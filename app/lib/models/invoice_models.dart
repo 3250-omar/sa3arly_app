@@ -212,6 +212,33 @@ class InvoiceModel {
   bool get hasTechnician =>
       technicianName != null && technicianName!.trim().isNotEmpty;
 
+  List<String> get distinctBrandNames {
+    final seen = <String>{};
+    final result = <String>[];
+    for (final item in items) {
+      final name = item.brandName?.trim();
+      if (name != null && name.isNotEmpty && name != 'غير محدد') {
+        if (seen.add(name)) {
+          result.add(name);
+        }
+      }
+    }
+    if (result.isEmpty) {
+      final top = brandName?.trim();
+      if (top != null && top.isNotEmpty && top != 'غير محدد') {
+        result.add(top);
+      }
+    }
+    return result;
+  }
+
+  String? get brandSummary {
+    final names = distinctBrandNames;
+    if (names.isEmpty) return null;
+    if (names.length == 1) return names.first;
+    return '${names.first} +${names.length - 1}';
+  }
+
   double get subtotal =>
       items.fold(0.0, (sum, item) => sum + item.lineTotal);
 

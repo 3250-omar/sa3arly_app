@@ -7,7 +7,16 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Sanitary Pricing App</string>
+	<string>سعرلي</string>
+	<key>NSCameraUsageDescription</key>
+	<string>مطلوب لتصوير كشوفات الفنيين المكتوبة بخط اليد وتسعيرها</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>مطلوب لاختيار صور الكشوفات من المعرض</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>whatsapp</string>
+		<string>tg</string>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

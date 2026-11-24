@@ -50,18 +50,29 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const CircleAvatar(
-                      radius: 30,
-                      backgroundColor: AppTheme.primaryColor,
-                      child: Icon(
-                        Icons.plumbing_rounded,
-                        size: 32,
-                        color: Colors.white,
+                    Center(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(18),
+                        child: Image.asset(
+                          'assets/icon/app_icon.png',
+                          width: 76,
+                          height: 76,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, _, _) => const CircleAvatar(
+                            radius: 30,
+                            backgroundColor: AppTheme.primaryColor,
+                            child: Icon(
+                              Icons.plumbing_rounded,
+                              size: 32,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(height: 14),
                     const Text(
-                      'تسجيل الدخول للمحل',
+                      'تسجيل الدخول — سعرلي',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 20,

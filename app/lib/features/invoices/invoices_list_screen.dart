@@ -46,7 +46,7 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             Text(
-                              inv.brandName ?? 'بدون شركة',
+                              inv.brandSummary ?? 'بدون شركة',
                               style: const TextStyle(
                                 fontWeight: FontWeight.w800,
                                 fontSize: 16,
@@ -87,12 +87,13 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
                               label: const Text('فتح'),
                             ),
                             TextButton.icon(
-                              onPressed: () => InvoiceShareService.openWhatsApp(
-                                invoice: inv,
-                                shop: shop,
-                              ),
+                              onPressed: () =>
+                                  InvoiceShareService.shareInvoicePdf(
+                                    invoice: inv,
+                                    shop: shop,
+                                  ),
                               icon: const Icon(Icons.share, size: 16),
-                              label: const Text('واتساب'),
+                              label: const Text('مشاركة PDF'),
                             ),
                           ],
                         ),
@@ -105,12 +106,12 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
         ),
         actions: [
           TextButton.icon(
-            onPressed: () => InvoiceShareService.openComparisonWhatsApp(
+            onPressed: () => InvoiceShareService.shareComparisonPdf(
               groupInvoices: groupInvoices,
               shop: shop,
             ),
-            icon: const Icon(Icons.chat_outlined, size: 18),
-            label: const Text('إرسال المقارنة واتساب'),
+            icon: const Icon(Icons.share_outlined, size: 18),
+            label: const Text('مشاركة المقارنة PDF'),
           ),
           TextButton.icon(
             onPressed: () => InvoiceShareService.previewOrPrintComparisonPdf(
@@ -153,9 +154,12 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
         final q = _search.trim().toLowerCase();
         final matchesCustomer = inv.customerName.toLowerCase().contains(q);
         final matchesNumber = inv.invoiceNumber.toLowerCase().contains(q);
-        final matchesTech =
-            (inv.technicianName ?? '').toLowerCase().contains(q);
-        final matchesBrand = (inv.brandName ?? '').toLowerCase().contains(q);
+        final matchesTech = (inv.technicianName ?? '').toLowerCase().contains(
+          q,
+        );
+        final matchesBrand =
+            (inv.brandSummary ?? '').toLowerCase().contains(q) ||
+            inv.distinctBrandNames.any((b) => b.toLowerCase().contains(q));
         return matchesCustomer || matchesNumber || matchesTech || matchesBrand;
       }
       return true;
@@ -215,9 +219,7 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
         ),
         Expanded(
           child: filtered.isEmpty
-              ? const Center(
-                  child: Text('لا توجد فواتير مطابقة حالياً'),
-                )
+              ? const Center(child: Text('لا توجد فواتير مطابقة حالياً'))
               : ListView.builder(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
                   itemCount: filtered.length,
@@ -226,12 +228,12 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
                     final groupInvoices = inv.comparisonGroupId == null
                         ? const <InvoiceModel>[]
                         : invoices
-                            .where(
-                              (other) =>
-                                  other.comparisonGroupId ==
-                                  inv.comparisonGroupId,
-                            )
-                            .toList();
+                              .where(
+                                (other) =>
+                                    other.comparisonGroupId ==
+                                    inv.comparisonGroupId,
+                              )
+                              .toList();
 
                     return Card(
                       margin: const EdgeInsets.only(bottom: 10),
@@ -271,8 +273,8 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
                                       fontWeight: FontWeight.w700,
                                       color:
                                           inv.status == InvoiceStatus.approved
-                                              ? AppTheme.highConfidenceColor
-                                              : AppTheme.mediumConfidenceColor,
+                                          ? AppTheme.highConfidenceColor
+                                          : AppTheme.mediumConfidenceColor,
                                     ),
                                   ),
                                 ),
@@ -290,9 +292,9 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
                                     color: Colors.grey.shade700,
                                   ),
                                 ),
-                                if (inv.brandName != null)
+                                if (inv.brandSummary != null)
                                   Text(
-                                    'الشركة: ${inv.brandName}',
+                                    'الشركة: ${inv.brandSummary}',
                                     style: const TextStyle(
                                       fontSize: 12,
                                       fontWeight: FontWeight.w600,
@@ -342,21 +344,23 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
                                   ),
                                 IconButton(
                                   tooltip: 'تصدير PDF / طباعة',
-                                  icon: const Icon(Icons.picture_as_pdf_outlined),
+                                  icon: const Icon(
+                                    Icons.picture_as_pdf_outlined,
+                                  ),
                                   onPressed: () =>
                                       InvoiceShareService.previewOrPrintPdf(
-                                    invoice: inv,
-                                    shop: catalog.shopSettings,
-                                  ),
+                                        invoice: inv,
+                                        shop: catalog.shopSettings,
+                                      ),
                                 ),
                                 IconButton(
-                                  tooltip: 'إرسال واتساب',
+                                  tooltip: 'مشاركة PDF (واتساب / تليجرام)',
                                   icon: const Icon(Icons.share_outlined),
                                   onPressed: () =>
-                                      InvoiceShareService.openWhatsApp(
-                                    invoice: inv,
-                                    shop: catalog.shopSettings,
-                                  ),
+                                      InvoiceShareService.shareInvoicePdf(
+                                        invoice: inv,
+                                        shop: catalog.shopSettings,
+                                      ),
                                 ),
                                 if (catalog.isAdminMode)
                                   IconButton(

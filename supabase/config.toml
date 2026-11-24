@@ -1,0 +1,4 @@
+project_id = "sanitary-pricing-app"
+
+[functions.scan-invoice]
+verify_jwt = true

@@ -12,5 +12,5 @@ class AppConfig {
   static bool get isDemoMode =>
       supabaseUrl.trim().isEmpty || supabaseAnonKey.trim().isEmpty;
 
-  static const String appTitle = 'مسعّر الأدوات الصحية';
+  static const String appTitle = 'سعرلي';
 }

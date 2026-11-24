@@ -4,6 +4,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:sanitary_pricing_app/core/theme/app_theme.dart';
+import 'package:sanitary_pricing_app/data/supabase_repository.dart';
 import 'package:sanitary_pricing_app/features/shell/main_shell.dart';
 import 'package:sanitary_pricing_app/models/invoice_models.dart';
 import 'package:sanitary_pricing_app/providers/catalog_provider.dart';
@@ -20,6 +21,7 @@ class DashboardScreen extends ConsumerStatefulWidget {
 
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   bool _isAnalyzing = false;
+  String _analyzeStatus = 'جاري تجهيز الصورة...';
 
   Future<void> _showScanSheet() async {
     await showModalBottomSheet<void>(
@@ -108,7 +110,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 
   Future<void> _runScan(List<Uint8List> images) async {
-    setState(() => _isAnalyzing = true);
+    setState(() {
+      _isAnalyzing = true;
+      _analyzeStatus = 'جاري رفع الصورة وقراءة البنود...';
+    });
     try {
       final catalog = ref.read(catalogProvider);
       final count = ref.read(invoicesProvider).length;
@@ -120,6 +125,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       if (!mounted) return;
       ref.read(activeDraftProvider.notifier).setDraft(draft);
       context.push('/review');
+    } on AppException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -204,7 +214,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         : const Icon(Icons.document_scanner_rounded),
                     label: Text(
                       _isAnalyzing
-                          ? 'جاري قراءة الورقة بالـ AI...'
+                          ? _analyzeStatus
                           : 'تسعير ورقة جديدة (AI)',
                       style: const TextStyle(fontWeight: FontWeight.w700),
                     ),
@@ -371,7 +381,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               subtitle: Text(
                 [
                   inv.invoiceNumber,
-                  if (inv.brandName != null) inv.brandName!,
+                  if (inv.brandSummary != null) inv.brandSummary!,
                   if (inv.hasTechnician) 'فني: ${inv.technicianName}',
                   '${inv.items.length} بنود',
                 ].join(' • '),

@@ -1,10 +1,11 @@
+import 'dart:typed_data';
+
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:sanitary_pricing_app/models/catalog_models.dart';
 import 'package:sanitary_pricing_app/models/invoice_models.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 class InvoiceShareService {
   const InvoiceShareService._();
@@ -62,40 +63,28 @@ class InvoiceShareService {
     required InvoiceModel invoice,
     required ShopSettingsModel shop,
   }) async {
-    final message = buildShareText(invoice, shop);
-    final rawPhone = (invoice.customerPhone ?? '').replaceAll(RegExp(r'\D'), '');
-
-    String? normalizedPhone;
-    if (rawPhone.isNotEmpty) {
-      if (rawPhone.startsWith('01') && rawPhone.length == 11) {
-        normalizedPhone = '2$rawPhone';
-      } else if (rawPhone.startsWith('20')) {
-        normalizedPhone = rawPhone;
-      } else {
-        normalizedPhone = rawPhone;
-      }
-    }
-
-    final uri = normalizedPhone != null
-        ? Uri.https('wa.me', '/$normalizedPhone', {'text': message})
-        : Uri.https('wa.me', '/', {'text': message});
-
-    return await launchUrl(uri, mode: LaunchMode.externalApplication);
+    return shareInvoicePdf(invoice: invoice, shop: shop);
   }
 
   static Future<bool> openTelegram({
     required InvoiceModel invoice,
     required ShopSettingsModel shop,
   }) async {
-    final message = buildShareText(invoice, shop);
-    final uri = Uri.https('t.me', '/share/url', {
-      'url': shop.shopName,
-      'text': message,
-    });
-    return await launchUrl(uri, mode: LaunchMode.externalApplication);
+    return shareInvoicePdf(invoice: invoice, shop: shop);
   }
 
-  static Future<void> previewOrPrintPdf({
+  static Future<bool> shareInvoicePdf({
+    required InvoiceModel invoice,
+    required ShopSettingsModel shop,
+  }) async {
+    final bytes = await buildInvoicePdfBytes(invoice: invoice, shop: shop);
+    return Printing.sharePdf(
+      bytes: bytes,
+      filename: '${invoice.invoiceNumber}.pdf',
+    );
+  }
+
+  static Future<Uint8List> buildInvoicePdfBytes({
     required InvoiceModel invoice,
     required ShopSettingsModel shop,
   }) async {
@@ -104,6 +93,7 @@ class InvoiceShareService {
 
     final doc = pw.Document();
     final dateFmt = DateFormat('yyyy/MM/dd HH:mm', 'en_US');
+    final brandLabel = invoice.brandSummary;
 
     doc.addPage(
       pw.MultiPage(
@@ -178,8 +168,7 @@ class InvoiceShareService {
               // Technician name appears ONLY when provided
               if (invoice.hasTechnician)
                 pw.Text('الفني: ${invoice.technicianName!.trim()}'),
-              if ((invoice.brandName ?? '').trim().isNotEmpty)
-                pw.Text('الشركة: ${invoice.brandName}'),
+              if (brandLabel != null) pw.Text('الشركة: $brandLabel'),
               pw.Text('التاريخ: ${dateFmt.format(invoice.createdAt)}'),
             ],
           ),
@@ -271,9 +260,17 @@ class InvoiceShareService {
       ),
     );
 
+    return doc.save();
+  }
+
+  static Future<void> previewOrPrintPdf({
+    required InvoiceModel invoice,
+    required ShopSettingsModel shop,
+  }) async {
+    final bytes = await buildInvoicePdfBytes(invoice: invoice, shop: shop);
     await Printing.layoutPdf(
       name: '${invoice.invoiceNumber}.pdf',
-      onLayout: (format) async => doc.save(),
+      onLayout: (format) async => bytes,
     );
   }
 
@@ -327,32 +324,30 @@ class InvoiceShareService {
     required List<InvoiceModel> groupInvoices,
     required ShopSettingsModel shop,
   }) async {
-    if (groupInvoices.isEmpty) return false;
-    final message = buildComparisonShareText(groupInvoices, shop);
-    final rawPhone =
-        (groupInvoices.first.customerPhone ?? '').replaceAll(RegExp(r'\D'), '');
-
-    String? normalizedPhone;
-    if (rawPhone.isNotEmpty) {
-      if (rawPhone.startsWith('01') && rawPhone.length == 11) {
-        normalizedPhone = '2$rawPhone';
-      } else {
-        normalizedPhone = rawPhone;
-      }
-    }
-
-    final uri = normalizedPhone != null
-        ? Uri.https('wa.me', '/$normalizedPhone', {'text': message})
-        : Uri.https('wa.me', '/', {'text': message});
-
-    return await launchUrl(uri, mode: LaunchMode.externalApplication);
+    return shareComparisonPdf(groupInvoices: groupInvoices, shop: shop);
   }
 
-  static Future<void> previewOrPrintComparisonPdf({
+  static Future<bool> shareComparisonPdf({
     required List<InvoiceModel> groupInvoices,
     required ShopSettingsModel shop,
   }) async {
-    if (groupInvoices.isEmpty) return;
+    if (groupInvoices.isEmpty) return false;
+    final sorted = [...groupInvoices]
+      ..sort((a, b) => a.total.compareTo(b.total));
+    final bytes = await buildComparisonPdfBytes(
+      groupInvoices: sorted,
+      shop: shop,
+    );
+    return Printing.sharePdf(
+      bytes: bytes,
+      filename: 'comparison-${sorted.first.invoiceNumber}.pdf',
+    );
+  }
+
+  static Future<Uint8List> buildComparisonPdfBytes({
+    required List<InvoiceModel> groupInvoices,
+    required ShopSettingsModel shop,
+  }) async {
     final sorted = [...groupInvoices]
       ..sort((a, b) => a.total.compareTo(b.total));
     final first = sorted.first;
@@ -430,7 +425,8 @@ class InvoiceShareService {
           pw.SizedBox(height: 12),
           pw.TableHelper.fromTextArray(
             headers: [
-              for (final inv in sorted.reversed) inv.brandName ?? inv.invoiceNumber,
+              for (final inv in sorted.reversed)
+                inv.brandSummary ?? inv.invoiceNumber,
               'الكمية',
               'الصنف والمقاس',
               '#',
@@ -478,7 +474,7 @@ class InvoiceShareService {
                       mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                       children: [
                         pw.Text(
-                          'إجمالي ${inv.brandName ?? inv.invoiceNumber}:',
+                          'إجمالي ${inv.brandSummary ?? inv.invoiceNumber}:',
                           style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
                         ),
                         pw.Text(
@@ -496,7 +492,7 @@ class InvoiceShareService {
                   pw.Text(
                     sorted.last.total == sorted.first.total
                         ? 'الإجمالي متساوٍ بين الشركتين'
-                        : 'الفرق: ${formatCurrency(sorted.last.total - sorted.first.total)} (${sorted.first.brandName ?? "الأولى"} أوفر)',
+                        : 'الفرق: ${formatCurrency(sorted.last.total - sorted.first.total)} (${sorted.first.brandSummary ?? "الأولى"} أوفر)',
                     style: pw.TextStyle(
                       fontWeight: pw.FontWeight.bold,
                       color: PdfColor.fromHex('#15803D'),
@@ -510,9 +506,23 @@ class InvoiceShareService {
       ),
     );
 
+    return doc.save();
+  }
+
+  static Future<void> previewOrPrintComparisonPdf({
+    required List<InvoiceModel> groupInvoices,
+    required ShopSettingsModel shop,
+  }) async {
+    if (groupInvoices.isEmpty) return;
+    final sorted = [...groupInvoices]
+      ..sort((a, b) => a.total.compareTo(b.total));
+    final bytes = await buildComparisonPdfBytes(
+      groupInvoices: sorted,
+      shop: shop,
+    );
     await Printing.layoutPdf(
-      name: 'comparison-${first.invoiceNumber}.pdf',
-      onLayout: (format) async => doc.save(),
+      name: 'comparison-${sorted.first.invoiceNumber}.pdf',
+      onLayout: (format) async => bytes,
     );
   }
 }

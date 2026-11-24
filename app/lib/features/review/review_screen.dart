@@ -9,6 +9,7 @@ import 'package:sanitary_pricing_app/models/invoice_models.dart';
 import 'package:sanitary_pricing_app/providers/catalog_provider.dart';
 import 'package:sanitary_pricing_app/providers/invoice_provider.dart';
 import 'package:sanitary_pricing_app/services/invoice_share_service.dart';
+import 'package:sanitary_pricing_app/services/scan_service.dart';
 import 'package:uuid/uuid.dart';
 
 class ReviewScreen extends ConsumerStatefulWidget {
@@ -26,6 +27,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   late final TextEditingController _techCtrl;
   late final TextEditingController _discountCtrl;
   String? _loadedDraftId;
+  bool _hasUnsavedChanges = false;
 
   @override
   void initState() {
@@ -54,6 +56,18 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     _discountCtrl.text = draft.discountValue > 0
         ? draft.discountValue.toStringAsFixed(0)
         : '0';
+
+    final existsInSaved =
+        ref.read(invoicesProvider).any((inv) => inv.id == draft.id);
+    if (existsInSaved) {
+      _hasUnsavedChanges = false;
+    } else {
+      _hasUnsavedChanges = draft.items.isNotEmpty ||
+          draft.localScanImages.isNotEmpty ||
+          draft.customerName.trim().isNotEmpty ||
+          (draft.customerPhone ?? '').trim().isNotEmpty ||
+          (draft.technicianName ?? '').trim().isNotEmpty;
+    }
   }
 
   InvoiceModel _withFormFields(InvoiceModel draft) {
@@ -81,19 +95,49 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
   }
 
-  void _updateDraft(InvoiceModel updated) {
+  InvoiceModel _syncBrandSummary(InvoiceModel draft) {
+    final firstWithBrand = draft.items
+        .where((it) => it.brandId != null && it.brandId!.isNotEmpty)
+        .firstOrNull;
+    final nextBrandId = firstWithBrand?.brandId ?? draft.brandId;
+    final nextBrandName = draft.brandSummary ?? draft.brandName;
+    return InvoiceModel(
+      id: draft.id,
+      invoiceNumber: draft.invoiceNumber,
+      status: draft.status,
+      comparisonGroupId: draft.comparisonGroupId,
+      brandId: nextBrandId,
+      brandName: nextBrandName,
+      customerName: draft.customerName,
+      customerPhone: draft.customerPhone,
+      technicianName: draft.technicianName,
+      discountType: draft.discountType,
+      discountValue: draft.discountValue,
+      notes: draft.notes,
+      imagePaths: draft.imagePaths,
+      localScanImages: draft.localScanImages,
+      createdByName: draft.createdByName,
+      createdAt: draft.createdAt,
+      items: draft.items,
+    );
+  }
+
+  void _updateDraft(InvoiceModel updated, {bool markDirty = true}) {
+    if (markDirty) {
+      _hasUnsavedChanges = true;
+    }
     ref.read(activeDraftProvider.notifier).setDraft(updated);
   }
 
   void _updateItem(InvoiceModel draft, int index, InvoiceItemModel updated) {
     final items = [...draft.items];
     items[index] = updated;
-    _updateDraft(_withFormFields(draft).copyWith(items: items));
+    _updateDraft(_syncBrandSummary(_withFormFields(draft).copyWith(items: items)));
   }
 
   void _removeItem(InvoiceModel draft, int index) {
     final items = [...draft.items]..removeAt(index);
-    _updateDraft(_withFormFields(draft).copyWith(items: items));
+    _updateDraft(_syncBrandSummary(_withFormFields(draft).copyWith(items: items)));
   }
 
   Future<void> _showPerItemBrandSheet(
@@ -310,7 +354,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'الشركة الحالية: ${draft.brandName ?? "غير محددة"} — اختر الشركة الجديدة ثم حدد هل تريد استبدال الكشف أم الاحتفاظ بالاتنين للمقارنة:',
+                      'الشركة الحالية: ${draft.brandSummary ?? "غير محددة"} — اختر الشركة الجديدة ثم حدد هل تريد استبدال الكشف أم الاحتفاظ بالاتنين للمقارنة:',
                       style: TextStyle(
                         fontSize: 13,
                         color: Colors.grey.shade700,
@@ -359,12 +403,13 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                         final pair = ref
                             .read(invoicesProvider.notifier)
                             .saveComparisonPair(draft, selectedBrand);
+                        _hasUnsavedChanges = false;
                         Navigator.pop(ctx);
                         _showComparisonResultDialog(pair.first, pair.second);
                       },
                       icon: const Icon(Icons.compare_arrows_rounded),
                       label: Text(
-                        'الاحتفاظ بالاتنين للمقارنة (${draft.brandName ?? "الحالي"} و ${selectedBrand.name})',
+                        'الاحتفاظ بالاتنين للمقارنة (${draft.brandSummary ?? "الحالي"} و ${selectedBrand.name})',
                       ),
                     ),
                   ],
@@ -384,7 +429,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     final shop = ref.read(catalogProvider).shopSettings;
     final diff = (first.total - second.total).abs();
     final cheaper =
-        first.total <= second.total ? first.brandName : second.brandName;
+        first.total <= second.total ? first.brandSummary : second.brandSummary;
 
     showDialog<void>(
       context: context,
@@ -399,9 +444,9 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 invoice: first,
                 onSelect: () {
                   Navigator.pop(ctx);
-                  _updateDraft(first);
+                  _updateDraft(first, markDirty: false);
                 },
-                onWhatsApp: () => InvoiceShareService.openWhatsApp(
+                onWhatsApp: () => InvoiceShareService.shareInvoicePdf(
                   invoice: first,
                   shop: shop,
                 ),
@@ -412,9 +457,9 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 onSelect: () {
                   Navigator.pop(ctx);
                   _loadedDraftId = null;
-                  _updateDraft(second);
+                  _updateDraft(second, markDirty: false);
                 },
-                onWhatsApp: () => InvoiceShareService.openWhatsApp(
+                onWhatsApp: () => InvoiceShareService.shareInvoicePdf(
                   invoice: second,
                   shop: shop,
                 ),
@@ -429,7 +474,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 child: Text(
                   diff == 0
                       ? 'الإجمالي متساوٍ بين الشركتين'
-                      : 'الفرق: ${InvoiceShareService.formatCurrency(diff)} ($cheaper أوفر للعميل)',
+                      : 'الفرق: ${InvoiceShareService.formatCurrency(diff)} (${cheaper ?? "الأولى"} أوفر للعميل)',
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     fontWeight: FontWeight.w800,
@@ -442,12 +487,12 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
         ),
         actions: [
           TextButton.icon(
-            onPressed: () => InvoiceShareService.openComparisonWhatsApp(
+            onPressed: () => InvoiceShareService.shareComparisonPdf(
               groupInvoices: [first, second],
               shop: shop,
             ),
-            icon: const Icon(Icons.chat_outlined, size: 18),
-            label: const Text('إرسال المقارنة واتساب'),
+            icon: const Icon(Icons.share_outlined, size: 18),
+            label: const Text('مشاركة المقارنة PDF'),
           ),
           TextButton.icon(
             onPressed: () => InvoiceShareService.previewOrPrintComparisonPdf(
@@ -548,9 +593,13 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                                 final oldItem = draft.items[replaceIndex];
                                 final rawPhrase = oldItem.rawOcrText ??
                                     oldItem.itemName;
-                                ref
-                                    .read(catalogProvider.notifier)
-                                    .learnAlias(rawPhrase, t.id);
+                                final cleanedAlias =
+                                    ScanService.cleanAliasPhrase(rawPhrase);
+                                if (cleanedAlias.isNotEmpty) {
+                                  ref
+                                      .read(catalogProvider.notifier)
+                                      .learnAlias(cleanedAlias, t.id);
+                                }
 
                                 _updateItem(
                                   draft,
@@ -569,10 +618,13 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                                   ),
                                 );
                                 Navigator.pop(ctx);
+                                final shownAlias = cleanedAlias.isNotEmpty
+                                    ? cleanedAlias
+                                    : rawPhrase;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
                                     content: Text(
-                                      'تم ربط الصنف وحفظ "$rawPhrase" في قاموس المحل',
+                                      'تم ربط الصنف وحفظ "$shownAlias" في قاموس المحل',
                                     ),
                                   ),
                                 );
@@ -592,8 +644,10 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                                   confidence: OcrConfidence.high,
                                 );
                                 _updateDraft(
-                                  _withFormFields(draft).copyWith(
-                                    items: [...draft.items, newItem],
+                                  _syncBrandSummary(
+                                    _withFormFields(draft).copyWith(
+                                      items: [...draft.items, newItem],
+                                    ),
                                   ),
                                 );
                                 Navigator.pop(ctx);
@@ -658,7 +712,8 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
 
   void _saveDraft(InvoiceModel rawDraft, InvoiceStatus targetStatus) {
     final finalized = _withFormFields(rawDraft).copyWith(status: targetStatus);
-    _updateDraft(finalized);
+    _hasUnsavedChanges = false;
+    _updateDraft(finalized, markDirty: false);
     ref.read(invoicesProvider.notifier).saveInvoice(finalized);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -669,6 +724,54 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _handleUnsavedExit(InvoiceModel draft) async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('حفظ الكشف قبل الخروج؟'),
+        content: const Text(
+          'لم تقم بحفظ التغييرات على هذا الكشف بعد. هل تريد حفظه كعرض سعر للرجوع إليه لاحقاً أم مسحه والخروج؟',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('إلغاء'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'discard'),
+            style: TextButton.styleFrom(
+              foregroundColor: AppTheme.lowConfidenceColor,
+            ),
+            child: const Text('مسح والخروج'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: const Text('حفظ كعرض سعر'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+    if (choice == 'save') {
+      _saveDraft(draft, InvoiceStatus.quote);
+      if (context.canPop()) {
+        context.pop();
+      } else {
+        context.go('/');
+      }
+    } else if (choice == 'discard') {
+      final draftNotifier = ref.read(activeDraftProvider.notifier);
+      setState(() => _hasUnsavedChanges = false);
+      if (context.canPop()) {
+        context.pop();
+      } else {
+        context.go('/');
+      }
+      draftNotifier.clear();
+    }
   }
 
   @override
@@ -698,7 +801,13 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     _syncControllersIfNeeded(rawDraft);
     final draft = _withFormFields(rawDraft);
 
-    return Scaffold(
+    return PopScope(
+      canPop: !_hasUnsavedChanges,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _handleUnsavedExit(draft);
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: Text('مراجعة ${draft.invoiceNumber}'),
         actions: [
@@ -706,7 +815,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Chip(
               label: Text(
-                draft.brandName ?? 'شركة غير محددة',
+                draft.brandSummary ?? 'غير محدد',
                 style: const TextStyle(
                   fontWeight: FontWeight.w700,
                   color: AppTheme.primaryColor,
@@ -808,7 +917,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'الشركة الحالية: ${draft.brandName ?? "غير محددة"}',
+                            'الشركة الحالية: ${draft.brandSummary ?? "غير محددة"}',
                             style: const TextStyle(
                               fontWeight: FontWeight.w800,
                               color: AppTheme.primaryColor,
@@ -1064,21 +1173,13 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 spacing: 10,
                 runSpacing: 10,
                 children: [
-                  OutlinedButton.icon(
-                    onPressed: () => InvoiceShareService.openWhatsApp(
+                  FilledButton.icon(
+                    onPressed: () => InvoiceShareService.shareInvoicePdf(
                       invoice: draft,
                       shop: shop,
                     ),
-                    icon: const Icon(Icons.chat_outlined),
-                    label: const Text('إرسال واتساب'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: () => InvoiceShareService.openTelegram(
-                      invoice: draft,
-                      shop: shop,
-                    ),
-                    icon: const Icon(Icons.send_outlined),
-                    label: const Text('تليجرام'),
+                    icon: const Icon(Icons.share_outlined),
+                    label: const Text('مشاركة PDF (واتساب / تليجرام)'),
                   ),
                   OutlinedButton.icon(
                     onPressed: () => InvoiceShareService.previewOrPrintPdf(
@@ -1086,7 +1187,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                       shop: shop,
                     ),
                     icon: const Icon(Icons.picture_as_pdf_outlined),
-                    label: const Text('PDF / طباعة'),
+                    label: const Text('معاينة / طباعة PDF'),
                   ),
                 ],
               ),
@@ -1132,6 +1233,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           ),
         ),
       ),
+    ),
     );
   }
 }
@@ -1162,7 +1264,7 @@ class _ComparisonCard extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                invoice.brandName ?? 'بدون شركة',
+                invoice.brandSummary ?? 'بدون شركة',
                 style: const TextStyle(
                   fontWeight: FontWeight.w800,
                   fontSize: 15,
@@ -1187,7 +1289,7 @@ class _ComparisonCard extends StatelessWidget {
           Row(
             children: [
               TextButton(onPressed: onSelect, child: const Text('مراجعة')),
-              TextButton(onPressed: onWhatsApp, child: const Text('واتساب')),
+              TextButton(onPressed: onWhatsApp, child: const Text('مشاركة PDF')),
             ],
           ),
         ],

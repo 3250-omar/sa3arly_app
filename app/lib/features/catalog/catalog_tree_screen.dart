@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
@@ -674,6 +675,8 @@ class _ExcelImportExportDialogState
   final _pasteCtrl = TextEditingController();
   var _parsed = const CatalogCsvParseResult(rows: [], skippedLines: 0);
   var _isImporting = false;
+  String? _selectedFileName;
+  String? _fileError;
 
   @override
   void dispose() {
@@ -681,8 +684,50 @@ class _ExcelImportExportDialogState
     super.dispose();
   }
 
+  Future<void> _pickSpreadsheetFile() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['xlsx', 'csv', 'tsv', 'txt'],
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final picked = result.files.first;
+      final bytes = picked.bytes;
+      if (bytes == null || bytes.isEmpty) {
+        setState(() => _fileError = 'تعذر قراءة محتوى الملف المختار');
+        return;
+      }
+
+      final parsed = CatalogCsvService.parseUploadedFile(
+        fileName: picked.name,
+        bytes: bytes,
+      );
+      _pasteCtrl.clear();
+      if (!mounted) return;
+      setState(() {
+        _selectedFileName = picked.name;
+        _parsed = parsed;
+        _fileError = null;
+      });
+    } on FormatException catch (e) {
+      if (!mounted) return;
+      setState(() => _fileError = e.message);
+    } catch (_) {
+      if (!mounted) return;
+      setState(
+        () => _fileError =
+            'تعذر قراءة ملف Excel/CSV، تأكد من أنه بصيغة .xlsx أو .csv سليمة',
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final hasInput =
+        _selectedFileName != null || _pasteCtrl.text.trim().isNotEmpty;
+
     return AlertDialog(
       title: const Text('استيراد وتصدير Excel / CSV'),
       content: SizedBox(
@@ -693,10 +738,50 @@ class _ExcelImportExportDialogState
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Text(
-                'انسخ الصفوف من Excel (أو CSV) والصقها هنا بالترتيب:\nالقسم ، اسم الصنف ، المقاس ، الوحدة ، الشركة ، السعر',
+                'ارفع ملف Excel (.xlsx) أو CSV مباشرة، أو الصق الصفوف بالترتيب:\nالقسم ، اسم الصنف ، المقاس ، الوحدة ، الشركة ، السعر',
                 style: TextStyle(fontSize: 12),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
+              FilledButton.icon(
+                onPressed: _isImporting ? null : _pickSpreadsheetFile,
+                icon: const Icon(Icons.upload_file_rounded),
+                label: const Text('اختيار ملف Excel / CSV'),
+              ),
+              if (_selectedFileName != null) ...[
+                const SizedBox(height: 8),
+                Chip(
+                  avatar: const Icon(
+                    Icons.description_outlined,
+                    size: 18,
+                    color: AppTheme.primaryColor,
+                  ),
+                  label: Text(_selectedFileName!),
+                  deleteIcon: const Icon(Icons.close, size: 18),
+                  onDeleted: _isImporting
+                      ? null
+                      : () {
+                          setState(() {
+                            _selectedFileName = null;
+                            _parsed = const CatalogCsvParseResult(
+                              rows: [],
+                              skippedLines: 0,
+                            );
+                          });
+                        },
+                ),
+              ],
+              if (_fileError != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  _fileError!,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.lowConfidenceColor,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 10),
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
@@ -707,6 +792,8 @@ class _ExcelImportExportDialogState
                         : () {
                             _pasteCtrl.text = CatalogCsvService.sampleTemplate;
                             setState(() {
+                              _selectedFileName = null;
+                              _fileError = null;
                               _parsed = CatalogCsvService.parseImportText(
                                 _pasteCtrl.text,
                               );
@@ -741,19 +828,21 @@ class _ExcelImportExportDialogState
               const SizedBox(height: 10),
               TextField(
                 controller: _pasteCtrl,
-                maxLines: 7,
+                maxLines: 5,
                 onChanged: (val) {
                   setState(() {
+                    _selectedFileName = null;
+                    _fileError = null;
                     _parsed = CatalogCsvService.parseImportText(val);
                   });
                 },
                 decoration: const InputDecoration(
-                  hintText: 'تغذية (بولي),كوع لحام,1/2 بوصة,قطعة,الشريف,18',
+                  hintText: 'أو الصق هنا: تغذية (بولي),كوع لحام,1/2 بوصة,قطعة,الشريف,18',
                   alignLabelWithHint: true,
                 ),
               ),
               const SizedBox(height: 8),
-              if (_pasteCtrl.text.trim().isNotEmpty)
+              if (hasInput) ...[
                 Text(
                   'صفوف صالحة للاستيراد: ${_parsed.rows.length} | صفوف متجاهلة: ${_parsed.skippedLines}',
                   style: TextStyle(
@@ -764,6 +853,18 @@ class _ExcelImportExportDialogState
                         : AppTheme.lowConfidenceColor,
                   ),
                 ),
+                if (_parsed.rows.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  for (final r in _parsed.rows.take(3))
+                    Text(
+                      '• ${r.itemName}${r.size != null ? " (${r.size})" : ""} — ${r.brandName}: ${InvoiceShareService.formatCurrency(r.price)}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                ],
+              ],
             ],
           ),
         ),

@@ -1,3 +1,6 @@
+import 'dart:typed_data';
+
+import 'package:excel/excel.dart' as xl;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
@@ -8,6 +11,7 @@ import 'package:sanitary_pricing_app/models/invoice_models.dart';
 import 'package:sanitary_pricing_app/providers/catalog_provider.dart';
 import 'package:sanitary_pricing_app/services/catalog_csv_service.dart';
 import 'package:sanitary_pricing_app/services/invoice_share_service.dart';
+import 'package:sanitary_pricing_app/services/scan_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -221,5 +225,157 @@ void main() {
     expect(find.text('تقارير المبيعات والأداء'), findsOneWidget);
     expect(find.text('أداء الموظفين'), findsOneWidget);
     expect(find.text('الأصناف الأكثر طلباً'), findsOneWidget);
+  });
+
+  test('InvoiceModel.brandSummary formats 0, 1, and multiple brands', () {
+    final emptyInv = InvoiceModel(
+      id: 'b0',
+      invoiceNumber: 'INV-00001',
+      createdAt: DateTime(2026, 11, 23),
+    );
+    expect(emptyInv.brandSummary, isNull);
+
+    final singleInv = emptyInv.copyWith(
+      items: const [
+        InvoiceItemModel(
+          id: 'i1',
+          itemName: 'كوع',
+          brandName: 'راك',
+          quantity: 1,
+          unitPrice: 15,
+        ),
+        InvoiceItemModel(
+          id: 'i2',
+          itemName: 'ماسورة',
+          brandName: 'راك',
+          quantity: 2,
+          unitPrice: 50,
+        ),
+      ],
+    );
+    expect(singleInv.brandSummary, 'راك');
+
+    final multiInv = emptyInv.copyWith(
+      items: const [
+        InvoiceItemModel(
+          id: 'i1',
+          itemName: 'كوع',
+          brandName: 'راك',
+          quantity: 1,
+          unitPrice: 15,
+        ),
+        InvoiceItemModel(
+          id: 'i2',
+          itemName: 'ماسورة',
+          brandName: 'الشريف',
+          quantity: 2,
+          unitPrice: 50,
+        ),
+        InvoiceItemModel(
+          id: 'i3',
+          itemName: 'محبس',
+          brandName: 'BR',
+          quantity: 1,
+          unitPrice: 80,
+        ),
+      ],
+    );
+    expect(multiInv.brandSummary, 'راك +2');
+  });
+
+  test('ScanService.detectBrandFromText detects brand from noisy text', () {
+    const brands = [
+      BrandModel(id: 'b-rak', name: 'راك', tier: BrandTier.mid),
+      BrandModel(id: 'b-sh', name: 'الشريف', tier: BrandTier.premium),
+    ];
+
+    expect(
+      ScanService.detectBrandFromText('كوع راك ثيرم 3/4', brands)?.name,
+      'راك',
+    );
+    expect(
+      ScanService.detectBrandFromText('ماسورة RAK 20 مم', brands)?.name,
+      'راك',
+    );
+    expect(
+      ScanService.detectBrandFromText('كوع بولي 3/4', brands),
+      isNull,
+    );
+  });
+
+  testWidgets(
+    'Prompts to save or discard when leaving ReviewScreen with unsaved scan',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('تسعير ورقة جديدة (AI)'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('تجربة كشف تجريبي جاهز (AI Demo)'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('تغيير الشركة / مقارنة'), findsOneWidget);
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('حفظ الكشف قبل الخروج؟'), findsOneWidget);
+      expect(find.text('حفظ كعرض سعر'), findsOneWidget);
+      expect(find.text('مسح والخروج'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'حفظ كعرض سعر'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('تسعير ورقة جديدة (AI)'), findsOneWidget);
+    },
+  );
+
+  test('CatalogCsvService.parseUploadedFile decodes .xlsx workbook bytes', () {
+    final excel = xl.Excel.createExcel();
+    final sheet = excel['Sheet1'];
+    sheet.appendRow([
+      xl.TextCellValue('القسم'),
+      xl.TextCellValue('اسم الصنف'),
+      xl.TextCellValue('المقاس'),
+      xl.TextCellValue('الوحدة'),
+      xl.TextCellValue('الشركة'),
+      xl.TextCellValue('السعر'),
+    ]);
+    sheet.appendRow([
+      xl.TextCellValue('تغذية (بولي)'),
+      xl.TextCellValue('كوع لحام'),
+      xl.TextCellValue('3/4 بوصة'),
+      xl.TextCellValue('قطعة'),
+      xl.TextCellValue('راك'),
+      xl.DoubleCellValue(24.5),
+    ]);
+    sheet.appendRow([
+      xl.TextCellValue('صرف'),
+      xl.TextCellValue('سيفونة أرضية'),
+      xl.TextCellValue('غير مذكور'),
+      xl.TextCellValue('قطعة'),
+      xl.TextCellValue('راك'),
+      xl.TextCellValue('١٣٥'),
+    ]);
+
+    final raw = excel.encode();
+    expect(raw, isNotNull);
+
+    final parsed = CatalogCsvService.parseUploadedFile(
+      fileName: 'prices.xlsx',
+      bytes: Uint8List.fromList(raw!),
+    );
+    expect(parsed.skippedLines, 0);
+    expect(parsed.rows.length, 2);
+    expect(parsed.rows[0].itemName, 'كوع لحام');
+    expect(parsed.rows[0].size, '3/4 بوصة');
+    expect(parsed.rows[0].price, 24.5);
+    expect(parsed.rows[1].size, isNull);
+    expect(parsed.rows[1].price, 135);
   });
 }

@@ -266,10 +266,6 @@ class ActiveDraftNotifier extends Notifier<InvoiceModel?> {
   }
 
   void startBlankInvoice() {
-    final catalog = ref.read(catalogProvider);
-    final defaultBrand =
-        catalog.findBrand(catalog.shopSettings.defaultBrandId) ??
-            catalog.brands.firstOrNull;
     final nextNum =
         ref.read(invoicesProvider.notifier).generateNextInvoiceNumber();
 
@@ -277,8 +273,6 @@ class ActiveDraftNotifier extends Notifier<InvoiceModel?> {
       id: _uuid.v4(),
       invoiceNumber: nextNum,
       status: InvoiceStatus.quote,
-      brandId: defaultBrand?.id,
-      brandName: defaultBrand?.name,
       createdAt: DateTime.now(),
     );
   }
