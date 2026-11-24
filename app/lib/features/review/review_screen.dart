@@ -26,7 +26,9 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   late final TextEditingController _phoneCtrl;
   late final TextEditingController _techCtrl;
   late final TextEditingController _discountCtrl;
+  late final FocusNode _customerFocusNode;
   String? _loadedDraftId;
+  String? _customerNameError;
   bool _hasUnsavedChanges = false;
 
   @override
@@ -36,6 +38,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     _phoneCtrl = TextEditingController();
     _techCtrl = TextEditingController();
     _discountCtrl = TextEditingController(text: '0');
+    _customerFocusNode = FocusNode();
   }
 
   @override
@@ -44,6 +47,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     _phoneCtrl.dispose();
     _techCtrl.dispose();
     _discountCtrl.dispose();
+    _customerFocusNode.dispose();
     super.dispose();
   }
 
@@ -710,20 +714,124 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
   }
 
-  void _saveDraft(InvoiceModel rawDraft, InvoiceStatus targetStatus) {
+  Future<void> _showApprovedShareDialog(InvoiceModel invoice) async {
+    final shop = ref.read(catalogProvider).shopSettings;
+    final messenger = ScaffoldMessenger.of(context);
+    final normalizedPhone = InvoiceShareService.normalizeEgyptianWhatsAppPhone(
+      invoice.customerPhone,
+    );
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(
+          Icons.check_circle_rounded,
+          color: AppTheme.highConfidenceColor,
+          size: 42,
+        ),
+        title: const Text(
+          'تم اعتماد الفاتورة بنجاح',
+          textAlign: TextAlign.center,
+        ),
+        content: SizedBox(
+          width: 380,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'فاتورة ${invoice.invoiceNumber} — الإجمالي: ${InvoiceShareService.formatCurrency(invoice.total)}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.primaryColor,
+                ),
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                key: const Key('approved_whatsapp_btn'),
+                onPressed: () => InvoiceShareService.openWhatsApp(
+                  invoice: invoice,
+                  shop: shop,
+                ),
+                icon: const Icon(Icons.chat_outlined),
+                label: Text(
+                  normalizedPhone != null
+                      ? 'إرسال واتساب إلى ${invoice.customerPhone!.trim()}'
+                      : 'إرسال عبر واتساب',
+                ),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                key: const Key('approved_share_pdf_btn'),
+                onPressed: () => InvoiceShareService.shareInvoicePdf(
+                  invoice: invoice,
+                  shop: shop,
+                ),
+                icon: const Icon(Icons.share_outlined),
+                label: const Text('مشاركة ملف PDF'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                key: const Key('approved_preview_pdf_btn'),
+                onPressed: () => InvoiceShareService.previewOrPrintPdf(
+                  invoice: invoice,
+                  shop: shop,
+                ),
+                icon: const Icon(Icons.picture_as_pdf_outlined),
+                label: const Text('معاينة / طباعة PDF'),
+              ),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                key: const Key('approved_save_only_btn'),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  messenger.showSnackBar(
+                    const SnackBar(
+                      content: Text('تم اعتماد الفاتورة وحفظها بنجاح'),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.done_all_rounded),
+                label: const Text('حفظ فقط'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  bool _saveDraft(InvoiceModel rawDraft, InvoiceStatus targetStatus) {
+    if (_customerCtrl.text.trim().isEmpty) {
+      setState(() => _customerNameError = 'مطلوب إدخال اسم العميل أولاً');
+      _customerFocusNode.requestFocus();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('مطلوب إدخال اسم العميل قبل حفظ أو اعتماد الفاتورة'),
+        ),
+      );
+      return false;
+    }
+
+    if (_customerNameError != null) {
+      setState(() => _customerNameError = null);
+    }
+
     final finalized = _withFormFields(rawDraft).copyWith(status: targetStatus);
     _hasUnsavedChanges = false;
     _updateDraft(finalized, markDirty: false);
     ref.read(invoicesProvider.notifier).saveInvoice(finalized);
+    if (targetStatus == InvoiceStatus.approved) {
+      _showApprovedShareDialog(finalized);
+      return true;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          targetStatus == InvoiceStatus.approved
-              ? 'تم اعتماد الفاتورة وحفظها في قاعدة البيانات'
-              : 'تم حفظ عرض السعر بنجاح',
-        ),
+      const SnackBar(
+        content: Text('تم حفظ عرض السعر بنجاح'),
       ),
     );
+    return true;
   }
 
   Future<void> _handleUnsavedExit(InvoiceModel draft) async {
@@ -756,7 +864,8 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
 
     if (!mounted) return;
     if (choice == 'save') {
-      _saveDraft(draft, InvoiceStatus.quote);
+      final saved = _saveDraft(draft, InvoiceStatus.quote);
+      if (!saved) return;
       if (context.canPop()) {
         context.pop();
       } else {
@@ -777,7 +886,6 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   @override
   Widget build(BuildContext context) {
     final rawDraft = ref.watch(activeDraftProvider);
-    final shop = ref.watch(catalogProvider.select((c) => c.shopSettings));
 
     if (rawDraft == null) {
       return Scaffold(
@@ -970,11 +1078,19 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                         children: [
                           Expanded(
                             child: TextField(
+                              key: const Key('review_customer_name_field'),
                               controller: _customerCtrl,
-                              onChanged: (_) =>
-                                  _updateDraft(_withFormFields(draft)),
+                              focusNode: _customerFocusNode,
+                              onChanged: (v) {
+                                if (_customerNameError != null &&
+                                    v.trim().isNotEmpty) {
+                                  setState(() => _customerNameError = null);
+                                }
+                                _updateDraft(_withFormFields(draft));
+                              },
                               decoration: InputDecoration(
-                                labelText: 'اسم العميل',
+                                labelText: 'اسم العميل *',
+                                errorText: _customerNameError,
                                 prefixIcon: const Icon(Icons.person_outline),
                                 suffixIcon: IconButton(
                                   tooltip: 'اختيار عميل سابق',
@@ -988,6 +1104,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                           const SizedBox(width: 10),
                           Expanded(
                             child: TextField(
+                              key: const Key('review_customer_phone_field'),
                               controller: _phoneCtrl,
                               keyboardType: TextInputType.phone,
                               onChanged: (_) =>
@@ -1165,31 +1282,6 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                     ],
                   ),
                 ),
-              ),
-              const SizedBox(height: 14),
-
-              // Share & Export Row
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  FilledButton.icon(
-                    onPressed: () => InvoiceShareService.shareInvoicePdf(
-                      invoice: draft,
-                      shop: shop,
-                    ),
-                    icon: const Icon(Icons.share_outlined),
-                    label: const Text('مشاركة PDF (واتساب / تليجرام)'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: () => InvoiceShareService.previewOrPrintPdf(
-                      invoice: draft,
-                      shop: shop,
-                    ),
-                    icon: const Icon(Icons.picture_as_pdf_outlined),
-                    label: const Text('معاينة / طباعة PDF'),
-                  ),
-                ],
               ),
             ],
           ),

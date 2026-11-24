@@ -6,15 +6,13 @@ declare const Deno: {
 const MAX_IMAGES = 5;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-const GEMINI_MODELS = [
-  "gemini-3.8-flash",
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
-];
 const GITHUB_WAVE_1 = ["openai/gpt-4.1-mini"];
 const GITHUB_WAVE_2 = ["openai/gpt-4o-mini"];
-const OPENROUTER_FALLBACK_MODELS = [
+const OPENROUTER_WAVE_1 = [
   "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
+];
+const OPENROUTER_WAVE_2 = [
   "nvidia/nemotron-3.5-super-vl:free",
   "openrouter/free",
 ];
@@ -23,6 +21,7 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOCAL_ORIGIN_RE =
   /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d{1,5})?$/i;
+const TUNNEL_ORIGIN_RE = /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i;
 
 interface BrandRow {
   id: string;
@@ -61,7 +60,9 @@ function isAllowedOrigin(origin: string): boolean {
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0 && s !== "*");
-  return list.length > 0 ? list.includes(origin) : LOCAL_ORIGIN_RE.test(origin);
+  return list.length > 0
+    ? list.includes(origin)
+    : LOCAL_ORIGIN_RE.test(origin) || TUNNEL_ORIGIN_RE.test(origin);
 }
 
 function secHeaders(origin: string | null): Record<string, string> {
@@ -107,7 +108,19 @@ function normalizeAr(value: string): string {
     .replace(/راكثيرم/g, "راك ثيرم")
     .replace(/اكواثيرم|اكوا\s*ثيرم|aquatherm/g, "اكواثيرم")
     .replace(/بي\s*ار|بى\s*ار/g, "br")
-    .replace(/(?:^|\s)(?:تيه|تي|ت)(?=\s|$)/g, " t ")
+    .replace(/(?:^|\s)(?:تيه|تي|ت|مشترك|قسام)(?=\s|$)/g, " t ")
+    .replace(/\b(?:واى|مشطوف)\b/g, "واي")
+    .replace(/كوع\s*(?:مفتوح|45)/g, "كوع فاتح")
+    .replace(/كوع\s*(?:قفل|مقفول)/g, "كوع عادي")
+    .replace(/كوع\s*(?:ب?باب|كشف|تسليك)/g, "كوع بالباب")
+    .replace(/(?:^|\s)t\s*(?:ب?باب|كشف|تسليك)/g, " t بالباب")
+    .replace(/\b(?:بيبه|بالوعه|سيفون\s*ارضيه)\b/g, "بلاعه")
+    .replace(/\bطربوش(?:\s*تهويه|\s*صرف)?\b/g, "هوايه")
+    .replace(/\b(?:عدايه|مطب|كرانك)\b/g, "كرنك")
+    .replace(/\b(?:سده|سداده)\b/g, "طبه")
+    .replace(/\b(?:كليبس|مشبك|حزام\s*ماسوره)\b/g, "قفيز")
+    .replace(/\b(?:يونيون|لاكر)\b/g, "لاكور")
+    .replace(/\b(?:بوش|رديوسر|تخفيض)\b/g, "نقاص")
     .replace(/\b(?:انثي|نتايه)\b/g, "داخلي")
     .replace(/\b(?:دكر|خارجي)\b/g, "ذكر")
     .replace(/[^\p{L}\p{N}/×*.\s]/gu, " ")
@@ -330,52 +343,6 @@ function extractErrMsg(body: unknown, status: number): string {
   return "HTTP " + status;
 }
 
-async function attemptGemini(
-  model: string,
-  geminiKey: string,
-  gemPayload: Record<string, unknown>,
-  gemPayloadNoThinking: Record<string, unknown>,
-  timeoutMs: number,
-  signal: AbortSignal,
-): Promise<WaveResult> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-  const headers = {
-    "Content-Type": "application/json",
-    "x-goog-api-key": geminiKey,
-  };
-  let res = await fetchJsonWithTimeout(
-    url,
-    { method: "POST", headers, body: JSON.stringify(gemPayload) },
-    timeoutMs,
-    signal,
-  );
-  if (res.status === 400) {
-    res = await fetchJsonWithTimeout(
-      url,
-      { method: "POST", headers, body: JSON.stringify(gemPayloadNoThinking) },
-      timeoutMs,
-      signal,
-    );
-  }
-  if (!res.ok) {
-    const msg = extractErrMsg(res.body, res.status);
-    console.error(`Gemini error on ${model}: ${res.status} ${msg}`);
-    throw Object.assign(new Error(msg), { status: res.status });
-  }
-  const data = res.body as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  };
-  const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (typeof txt !== "string" || !txt.trim()) {
-    throw Object.assign(new Error("Empty Gemini response"), { status: 502 });
-  }
-  const parsed = parseAiJson(txt);
-  if (!parsed) {
-    throw Object.assign(new Error("Malformed Gemini JSON"), { status: 502 });
-  }
-  return { parsed, modelUsed: model };
-}
-
 async function attemptOpenAiCompatible(
   providerName: string,
   endpoint: string,
@@ -563,12 +530,16 @@ function buildCompactCatalog(
 
   if (aliases.length > 0) {
     ctxLines.push("المسميات (alias=>tid):");
+    const pairs: string[] = [];
     for (const a of aliases) {
       const tid = templateIdToIdx.get(a.item_template_id);
       const cleanedAlias = stripLeadingQty(a.alias_text);
       if (tid && cleanedAlias) {
-        ctxLines.push(`${cleanedAlias}=>${tid}`);
+        pairs.push(`${cleanedAlias}=>${tid}`);
       }
+    }
+    for (let i = 0; i < pairs.length; i += 10) {
+      ctxLines.push(pairs.slice(i, i + 10).join(" | "));
     }
   }
 
@@ -620,10 +591,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const sbUrl = Deno.env.get("SUPABASE_URL");
   const sbKey = Deno.env.get("SUPABASE_ANON_KEY");
-  const geminiKey = Deno.env.get("GEMINI_API_KEY");
   const githubToken = Deno.env.get("GITHUB_TOKEN");
   const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
-  if (!sbUrl || !sbKey || (!geminiKey && !githubToken && !openRouterKey)) {
+  if (!sbUrl || !sbKey || (!githubToken && !openRouterKey)) {
     console.error("Missing required env vars");
     return jsonRes(500, { error: "Server configuration error" }, origin);
   }
@@ -741,59 +711,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
     "- ممنوع اختيار 'شعبي' إلا إذا كُتبت كلمة 'شعبي' أو 'اقتصادي' صراحة في الورقة، وإلا ضع bid: null.",
     "قواعد المقاسات والسباكة المصرية:",
     "- 'نص' أو '1/2' أو '20مم' => '1/2 بوصة' | 'تلات ارباع' أو '3/4' أو '25مم' => '3/4 بوصة' | '1' أو 'بوصة' أو '32مم' => '1 بوصة' | 'بوصة ونص' أو '1.5' أو '50مم' => '1.5 بوصة' | '2' أو '63مم' => '2 بوصة'.",
+    "- مصطلحات السباكين: بيبة=بلاعة، مشترك/قسام=T، مشطوف=واي، كوع مفتوح/45=كوع فاتح، كوع قفل=كوع عادي، كوع باب/كشف=كوع بالباب، عداية/مطب=كرنك، طربوش=هواية، سدة=طبة، كليبس=قفيز، يونيون=لاكور، بوش/رديوسر=نقاص، نتاية=داخلي، دكر=ذكر.",
     "- فرّق بدقة بين: كوع، تيه (T)، جلبة، لاكور، طبة، نقاص، ماسورة، سن داخلي، سن ذكر، قفيز، صليبة، كرنك، ولا تخترع أصنافاً غير مكتوبة.",
     "أعد JSON فقط بدون أي نص إضافي:",
     '{"detected_brand_text":"نص الشركة أو null","bid":1,"items":[{"raw_ocr_text":"النص الأصلي","tid":12,"bid":1,"item_name":"اسم الصنف","size":"المقاس أو null","unit":"قطعة أو متر أو عود","quantity":1,"confidence":"high أو medium أو low","notes":"ملاحظة أو null"}]}',
     "الثقة: high عند تطابق الصنف والمقاس والكمية تماماً، medium عند الحاجة لتأكيد ماركة أو مقاس، low إذا كان غير واضح أو غير موجود بالكتالوج.",
   ].join("\n");
 
-  const parts: Array<Record<string, unknown>> = [
-    {
-      text: "كتالوج المحل:\n" + catalog.ctx + "\n\nاقرأ الصور واستخرج البنود:",
-    },
-    ...imgs.map((img) => ({
-      inlineData: { mimeType: img.mime, data: img.data },
-    })),
-  ];
-
-  const gemPayload = {
-    systemInstruction: { parts: [{ text: prompt }] },
-    contents: [{ role: "user", parts }],
-    generationConfig: {
-      temperature: 0.1,
-      responseMimeType: "application/json",
-      thinkingConfig: { thinkingBudget: 0 },
-    },
-  };
-  const gemPayloadNoThinking = {
-    systemInstruction: { parts: [{ text: prompt }] },
-    contents: [{ role: "user", parts }],
-    generationConfig: {
-      temperature: 0.1,
-      responseMimeType: "application/json",
-    },
-  };
-
   let winner: WaveResult | null = null;
   let lastStatus = 503;
   let lastDetail = "AI service temporarily busy";
 
-  // Wave 1: Parallel fast free race — Gemini + GitHub Models gpt-4.1-mini (10s strict end-to-end)
+  // Wave 1: Parallel fast free race — GitHub gpt-4.1-mini + OpenRouter Gemma 4 (12s strict end-to-end)
   const wave1Factories: Array<(s: AbortSignal) => Promise<WaveResult>> = [];
-  if (geminiKey) {
-    for (const m of GEMINI_MODELS) {
-      wave1Factories.push((sig) =>
-        attemptGemini(
-          m,
-          geminiKey,
-          gemPayload,
-          gemPayloadNoThinking,
-          10000,
-          sig,
-        ),
-      );
-    }
-  }
   if (githubToken) {
     for (const m of GITHUB_WAVE_1) {
       wave1Factories.push((sig) =>
@@ -805,9 +735,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
           prompt,
           catalog.ctx,
           imgs,
-          10000,
+          12000,
           sig,
           { includeDetailHigh: true },
+        ),
+      );
+    }
+  }
+  if (openRouterKey) {
+    for (const m of OPENROUTER_WAVE_1) {
+      wave1Factories.push((sig) =>
+        attemptOpenAiCompatible(
+          "OpenRouter",
+          "https://openrouter.ai/api/v1/chat/completions",
+          openRouterKey,
+          m,
+          prompt,
+          catalog.ctx,
+          imgs,
+          12000,
+          sig,
+          {
+            extraBody: { reasoning: { enabled: false } },
+            extraHeaders: { "X-Title": "Saarly" },
+          },
         ),
       );
     }
@@ -817,7 +768,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   lastStatus = w1.lastStatus;
   lastDetail = w1.lastDetail;
 
-  // Wave 2: Parallel free fallback — GitHub gpt-4o-mini + OpenRouter (18s strict end-to-end)
+  // Wave 2: Parallel free fallback — GitHub gpt-4o-mini + OpenRouter Nemotron/Router (18s strict end-to-end)
   if (!winner) {
     const wave2Factories: Array<(s: AbortSignal) => Promise<WaveResult>> = [];
     if (githubToken) {
@@ -839,7 +790,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       }
     }
     if (openRouterKey) {
-      for (const m of OPENROUTER_FALLBACK_MODELS) {
+      for (const m of OPENROUTER_WAVE_2) {
         wave2Factories.push((sig) =>
           attemptOpenAiCompatible(
             "OpenRouter",

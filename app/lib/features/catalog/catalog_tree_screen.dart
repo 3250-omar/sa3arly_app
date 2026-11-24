@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +8,7 @@ import 'package:sanitary_pricing_app/core/theme/app_theme.dart';
 import 'package:sanitary_pricing_app/models/catalog_models.dart';
 import 'package:sanitary_pricing_app/providers/catalog_provider.dart';
 import 'package:sanitary_pricing_app/services/catalog_csv_service.dart';
+import 'package:sanitary_pricing_app/services/file_bytes_reader.dart';
 import 'package:sanitary_pricing_app/services/invoice_share_service.dart';
 
 class CatalogTreeScreen extends ConsumerStatefulWidget {
@@ -63,7 +66,7 @@ class _CatalogTreeScreenState extends ConsumerState<CatalogTreeScreen> {
   Future<void> _showEditPriceDialog(
     ItemTemplateModel template,
     BrandModel brand,
-    double? currentPrice,
+    ProductVariantModel? currentVariant,
   ) async {
     final catalog = ref.read(catalogProvider);
     if (!catalog.isAdminMode) {
@@ -80,12 +83,15 @@ class _CatalogTreeScreenState extends ConsumerState<CatalogTreeScreen> {
       builder: (ctx) => _EditPriceDialog(
         template: template,
         brand: brand,
-        currentPrice: currentPrice,
-        onSave: (parsed) {
+        currentPrice: currentVariant?.price,
+        currentCommercialPrice: currentVariant?.commercialPrice,
+        onSave: (sellingPrice, commercialPrice) {
           ref.read(catalogProvider.notifier).upsertVariantPrice(
                 itemTemplateId: template.id,
                 brandId: brand.id,
-                price: parsed,
+                price: sellingPrice,
+                commercialPrice: commercialPrice,
+                clearCommercialPrice: commercialPrice == null,
               );
         },
       ),
@@ -118,6 +124,28 @@ class _CatalogTreeScreenState extends ConsumerState<CatalogTreeScreen> {
     await showDialog<void>(
       context: context,
       builder: (ctx) => const _ManageCategoriesBrandsDialog(),
+    );
+  }
+
+  Future<void> _showUpdateProfitDialog() async {
+    final catalog = ref.read(catalogProvider);
+    if (!catalog.isAdminMode) return;
+    final messenger = ScaffoldMessenger.of(context);
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _UpdateProfitDialog(
+        initialBrandId: catalog.selectedBrandId,
+        onApplied: (count) {
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text(
+                'تم تحديث سعر البيع لـ $count صنف بناءً على السعر التجاري',
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -178,6 +206,13 @@ class _CatalogTreeScreenState extends ConsumerState<CatalogTreeScreen> {
                     ),
                     if (catalog.isAdminMode) ...[
                       const SizedBox(width: 8),
+                      IconButton.filledTonal(
+                        key: const Key('update_profit_button'),
+                        tooltip: 'تعديل نسبة الربح',
+                        onPressed: _showUpdateProfitDialog,
+                        icon: const Icon(Icons.percent_rounded),
+                      ),
+                      const SizedBox(width: 6),
                       IconButton.filledTonal(
                         tooltip: 'استيراد / تصدير Excel',
                         onPressed: _showExcelImportExportDialog,
@@ -332,7 +367,7 @@ class _ProductTreeItemTile extends StatelessWidget {
   final Future<void> Function(
     ItemTemplateModel template,
     BrandModel brand,
-    double? currentPrice,
+    ProductVariantModel? currentVariant,
   ) onEditPrice;
 
   @override
@@ -406,7 +441,9 @@ class _ProductTreeItemTile extends StatelessWidget {
                       ),
                       label: Text(
                         variant != null
-                            ? '${brand.name}: ${InvoiceShareService.formatCurrency(variant.price)}'
+                            ? (variant.commercialPrice != null
+                                ? '${brand.name}: بيع ${InvoiceShareService.formatCurrency(variant.price)} | تجاري ${InvoiceShareService.formatCurrency(variant.commercialPrice!)}'
+                                : '${brand.name}: ${InvoiceShareService.formatCurrency(variant.price)}')
                             : '${brand.name}: غير مسعر',
                         style: TextStyle(
                           fontSize: 12,
@@ -417,7 +454,7 @@ class _ProductTreeItemTile extends StatelessWidget {
                         ),
                       ),
                       onPressed: () =>
-                          onEditPrice(template, brand, variant?.price),
+                          onEditPrice(template, brand, variant),
                     );
                   },
                 ),
@@ -587,13 +624,15 @@ class _EditPriceDialog extends StatefulWidget {
     required this.template,
     required this.brand,
     required this.currentPrice,
+    required this.currentCommercialPrice,
     required this.onSave,
   });
 
   final ItemTemplateModel template;
   final BrandModel brand;
   final double? currentPrice;
-  final ValueChanged<double> onSave;
+  final double? currentCommercialPrice;
+  final void Function(double sellingPrice, double? commercialPrice) onSave;
 
   @override
   State<_EditPriceDialog> createState() => _EditPriceDialogState();
@@ -601,13 +640,21 @@ class _EditPriceDialog extends StatefulWidget {
 
 class _EditPriceDialogState extends State<_EditPriceDialog> {
   late final TextEditingController _ctrl;
+  late final TextEditingController _commercialCtrl;
 
   @override
   void initState() {
     super.initState();
     _ctrl = TextEditingController(
       text: widget.currentPrice != null
-          ? widget.currentPrice!.toStringAsFixed(0)
+          ? widget.currentPrice!.toStringAsFixed(2).replaceFirst(RegExp(r'\.00$'), '')
+          : '',
+    );
+    _commercialCtrl = TextEditingController(
+      text: widget.currentCommercialPrice != null
+          ? widget.currentCommercialPrice!
+              .toStringAsFixed(2)
+              .replaceFirst(RegExp(r'\.00$'), '')
           : '',
     );
   }
@@ -615,6 +662,7 @@ class _EditPriceDialogState extends State<_EditPriceDialog> {
   @override
   void dispose() {
     _ctrl.dispose();
+    _commercialCtrl.dispose();
     super.dispose();
   }
 
@@ -629,10 +677,18 @@ class _EditPriceDialogState extends State<_EditPriceDialog> {
           Text(widget.template.displayLabel),
           const SizedBox(height: 12),
           TextField(
+            controller: _commercialCtrl,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(
+              labelText: 'السعر التجاري (ج.م) — اختياري',
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
             controller: _ctrl,
             autofocus: true,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(labelText: 'سعر البيع (ج.م)'),
+            decoration: const InputDecoration(labelText: 'سعر البيع (ج.م) *'),
           ),
         ],
       ),
@@ -644,8 +700,13 @@ class _EditPriceDialogState extends State<_EditPriceDialog> {
         ElevatedButton(
           onPressed: () {
             final parsed = double.tryParse(_ctrl.text.trim());
+            final rawComm = _commercialCtrl.text.trim();
+            final parsedComm = rawComm.isEmpty ? null : double.tryParse(rawComm);
+            if (rawComm.isNotEmpty && (parsedComm == null || parsedComm < 0)) {
+              return;
+            }
             if (parsed != null && parsed >= 0) {
-              widget.onSave(parsed);
+              widget.onSave(parsed, parsedComm);
               Navigator.pop(context);
             }
           },
@@ -673,6 +734,10 @@ class _ExcelImportExportDialog extends ConsumerStatefulWidget {
 class _ExcelImportExportDialogState
     extends ConsumerState<_ExcelImportExportDialog> {
   final _pasteCtrl = TextEditingController();
+  final _discountCtrl = TextEditingController();
+  final _markupCtrl = TextEditingController();
+  var _applyCompanyDiscount = false;
+  ProfitMarkupType _markupType = ProfitMarkupType.percent;
   var _parsed = const CatalogCsvParseResult(rows: [], skippedLines: 0);
   var _isImporting = false;
   String? _selectedFileName;
@@ -681,21 +746,70 @@ class _ExcelImportExportDialogState
   @override
   void dispose() {
     _pasteCtrl.dispose();
+    _discountCtrl.dispose();
+    _markupCtrl.dispose();
     super.dispose();
+  }
+
+  double? get _validDiscountPercent {
+    final val = _parseProfitMarkupValue(_discountCtrl.text);
+    if (val == null || val >= 100) return null;
+    return val;
+  }
+
+  bool get _isDiscountValid =>
+      !_applyCompanyDiscount || _validDiscountPercent != null;
+
+  double get _effectiveDiscountPercent =>
+      _applyCompanyDiscount ? (_validDiscountPercent ?? 0) : 0;
+
+  double? get _validMarkupValue => _parseProfitMarkupValue(_markupCtrl.text);
+
+  Future<Uint8List?> _resolvePickedFileBytes(PlatformFile picked) async {
+    if (picked.bytes != null && picked.bytes!.isNotEmpty) {
+      return picked.bytes;
+    }
+    if (picked.path != null && picked.path!.trim().isNotEmpty) {
+      final fromPath = await readFileBytesFromPath(picked.path!);
+      if (fromPath != null && fromPath.isNotEmpty) {
+        return fromPath;
+      }
+    }
+    final stream = picked.readStream;
+    if (stream != null) {
+      final builder = BytesBuilder(copy: false);
+      await for (final chunk in stream) {
+        builder.add(chunk);
+      }
+      final collected = builder.takeBytes();
+      if (collected.isNotEmpty) {
+        return collected;
+      }
+    }
+    return null;
   }
 
   Future<void> _pickSpreadsheetFile() async {
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: const ['xlsx', 'csv', 'tsv', 'txt'],
-        withData: true,
-      );
+      FilePickerResult? result;
+      try {
+        result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: const ['xlsx', 'csv', 'tsv', 'txt'],
+          withData: true,
+        );
+      } on PlatformException {
+        result = await FilePicker.platform.pickFiles(
+          type: FileType.any,
+          withData: true,
+        );
+      }
       if (result == null || result.files.isEmpty) return;
 
       final picked = result.files.first;
-      final bytes = picked.bytes;
+      final bytes = await _resolvePickedFileBytes(picked);
       if (bytes == null || bytes.isEmpty) {
+        if (!mounted) return;
         setState(() => _fileError = 'تعذر قراءة محتوى الملف المختار');
         return;
       }
@@ -709,16 +823,18 @@ class _ExcelImportExportDialogState
       setState(() {
         _selectedFileName = picked.name;
         _parsed = parsed;
-        _fileError = null;
+        _fileError = parsed.rows.isEmpty
+            ? 'لم يتم العثور على صفوف أسعار صالحة في الملف'
+            : null;
       });
     } on FormatException catch (e) {
       if (!mounted) return;
       setState(() => _fileError = e.message);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(
         () => _fileError =
-            'تعذر قراءة ملف Excel/CSV، تأكد من أنه بصيغة .xlsx أو .csv سليمة',
+            'تعذر قراءة ملف Excel/CSV (${e.runtimeType})، تأكد من أنه بصيغة .xlsx أو .csv سليمة',
       );
     }
   }
@@ -738,7 +854,7 @@ class _ExcelImportExportDialogState
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Text(
-                'ارفع ملف Excel (.xlsx) أو CSV مباشرة، أو الصق الصفوف بالترتيب:\nالقسم ، اسم الصنف ، المقاس ، الوحدة ، الشركة ، السعر',
+                'ارفع ملف Excel (.xlsx) أو CSV بالأسعار التجارية، أو الصق الصفوف بالترتيب:\nالقسم ، اسم الصنف ، المقاس ، الوحدة ، الشركة ، السعر التجاري',
                 style: TextStyle(fontSize: 12),
               ),
               const SizedBox(height: 10),
@@ -854,15 +970,177 @@ class _ExcelImportExportDialogState
                   ),
                 ),
                 if (_parsed.rows.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  for (final r in _parsed.rows.take(3))
-                    Text(
-                      '• ${r.itemName}${r.size != null ? " (${r.size})" : ""} — ${r.brandName}: ${InvoiceShareService.formatCurrency(r.price)}',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Colors.grey.shade700,
+                  const SizedBox(height: 12),
+                  Material(
+                    color: Colors.amber.withValues(alpha: 0.08),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(
+                        color: !_isDiscountValid
+                            ? AppTheme.lowConfidenceColor.withValues(alpha: 0.6)
+                            : Colors.amber.shade700.withValues(alpha: 0.35),
                       ),
                     ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          CheckboxListTile(
+                            key: const Key('company_discount_toggle'),
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            value: _applyCompanyDiscount,
+                            onChanged: _isImporting
+                                ? null
+                                : (v) => setState(
+                                      () => _applyCompanyDiscount = v ?? false,
+                                    ),
+                            title: const Text(
+                              'القائمة بأسعار الشركة (تطبيق خصم الشركة)',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            subtitle: const Text(
+                              'يتم خصم نسبة الشركة أولاً لحساب السعر التجاري، ثم إضافة الربح عليه',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                          ),
+                          if (_applyCompanyDiscount) ...[
+                            const SizedBox(height: 6),
+                            TextField(
+                              key: const Key('company_discount_field'),
+                              controller: _discountCtrl,
+                              enabled: !_isImporting,
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                decimal: true,
+                              ),
+                              onChanged: (_) => setState(() {}),
+                              decoration: const InputDecoration(
+                                labelText: 'نسبة خصم الشركة (%) *',
+                                hintText: 'مثال: 15',
+                              ),
+                            ),
+                            if (_validDiscountPercent == null) ...[
+                              const SizedBox(height: 6),
+                              const Text(
+                                'أدخل نسبة خصم صحيحة (من 0 إلى أقل من 100%)',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppTheme.lowConfidenceColor,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AppTheme.primaryColor.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: _validMarkupValue == null
+                            ? AppTheme.lowConfidenceColor.withValues(alpha: 0.5)
+                            : AppTheme.primaryColor.withValues(alpha: 0.25),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Text(
+                          'إعداد نسبة / قيمة المكسب على الأسعار التجارية (إجباري):',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: AppTheme.primaryColor,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            for (final type in ProfitMarkupType.values)
+                              ChoiceChip(
+                                label: Text(type.arabicLabel),
+                                selected: _markupType == type,
+                                onSelected: _isImporting
+                                    ? null
+                                    : (_) => setState(() => _markupType = type),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          key: const Key('profit_markup_field'),
+                          controller: _markupCtrl,
+                          enabled: !_isImporting,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          onChanged: (_) => setState(() {}),
+                          decoration: InputDecoration(
+                            labelText: _markupType == ProfitMarkupType.percent
+                                ? 'نسبة المكسب (%) *'
+                                : 'قيمة المكسب الثابتة (ج.م) *',
+                            hintText: _markupType == ProfitMarkupType.percent
+                                ? 'مثال: 20'
+                                : 'مثال: 10',
+                          ),
+                        ),
+                        if (_validMarkupValue == null) ...[
+                          const SizedBox(height: 6),
+                          const Text(
+                            'مطلوب إدخال قيمة المكسب لحساب سعر البيع قبل الاستيراد',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: AppTheme.lowConfidenceColor,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  for (final r in _parsed.rows.take(3)) ...[
+                    Builder(
+                      builder: (_) {
+                        final effectiveCommercial = _effectiveDiscountPercent > 0
+                            ? calculateDiscountedCommercialPrice(
+                                r.price,
+                                _effectiveDiscountPercent,
+                              )
+                            : r.price;
+                        final prefix =
+                            '• ${r.itemName}${r.size != null ? " (${r.size})" : ""} — ${r.brandName}: ';
+                        final pricePart = _effectiveDiscountPercent > 0
+                            ? 'قائمة ${InvoiceShareService.formatCurrency(r.price)} ← تجاري ${InvoiceShareService.formatCurrency(effectiveCommercial)}'
+                            : 'تجاري ${InvoiceShareService.formatCurrency(effectiveCommercial)}';
+                        final sellingPart = _validMarkupValue != null
+                            ? ' | بيع ${InvoiceShareService.formatCurrency(calculateSellingPrice(effectiveCommercial, _markupType, _validMarkupValue!))}'
+                            : '';
+                        return Text(
+                          '$prefix$pricePart$sellingPart',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey.shade700,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                 ],
               ],
             ],
@@ -875,14 +1153,24 @@ class _ExcelImportExportDialogState
           child: const Text('إغلاق'),
         ),
         ElevatedButton.icon(
-          onPressed: _isImporting || _parsed.rows.isEmpty
+          onPressed: _isImporting ||
+                  _parsed.rows.isEmpty ||
+                  _validMarkupValue == null ||
+                  !_isDiscountValid
               ? null
               : () async {
+                  final markupValue = _validMarkupValue;
+                  if (markupValue == null || !_isDiscountValid) return;
                   setState(() => _isImporting = true);
                   try {
                     final count = await ref
                         .read(catalogProvider.notifier)
-                        .importCatalogRows(_parsed.rows);
+                        .importCatalogRows(
+                          _parsed.rows,
+                          markupType: _markupType,
+                          markupValue: markupValue,
+                          companyDiscountPercent: _effectiveDiscountPercent,
+                        );
                     if (!context.mounted) return;
                     Navigator.pop(context);
                     widget.onImported(count);
@@ -1039,6 +1327,349 @@ class _ManageCategoriesBrandsDialogState
         TextButton(
           onPressed: () => Navigator.pop(context),
           child: const Text('إغلاق'),
+        ),
+      ],
+    );
+  }
+}
+
+double? _parseProfitMarkupValue(String rawInput) {
+  final raw = rawInput.trim();
+  if (raw.isEmpty) return null;
+  const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
+  final normalized = raw
+      .replaceAllMapped(
+        RegExp(r'[٠-٩]'),
+        (m) => arabicDigits.indexOf(m.group(0)!).toString(),
+      )
+      .replaceAll('،', '.')
+      .replaceAll(',', '.');
+  final val = double.tryParse(normalized);
+  if (val == null || val < 0) return null;
+  return val;
+}
+
+String _formatCompactNumber(double value) {
+  final rounded = (value * 10).round() / 10.0;
+  if (rounded == rounded.roundToDouble()) {
+    return rounded.toInt().toString();
+  }
+  return rounded.toString();
+}
+
+String? _summarizeCurrentProfit(List<ProductVariantModel> variants) {
+  if (variants.isEmpty) return null;
+
+  if (variants.length == 1) {
+    final c = variants.first.commercialPrice!;
+    final diff = variants.first.price - c;
+    if (c > 0) {
+      final pct = (diff / c) * 100.0;
+      return 'الربح الحالي: ${_formatCompactNumber(pct)}% (+${InvoiceShareService.formatCurrency(diff)})';
+    }
+    return 'الربح الحالي: مبلغ ثابت ${InvoiceShareService.formatCurrency(diff)}';
+  }
+
+  final diffs = <double>[];
+  final pcts = <double>[];
+  for (final v in variants) {
+    final c = v.commercialPrice!;
+    final diff = v.price - c;
+    diffs.add(diff);
+    if (c > 0) {
+      pcts.add((diff / c) * 100.0);
+    }
+  }
+
+  var minDiff = diffs.first;
+  var maxDiff = diffs.first;
+  var sumDiff = 0.0;
+  for (final d in diffs) {
+    if (d < minDiff) minDiff = d;
+    if (d > maxDiff) maxDiff = d;
+    sumDiff += d;
+  }
+  final avgDiff = sumDiff / diffs.length;
+
+  var minPct = 0.0;
+  var maxPct = 0.0;
+  var avgPct = 0.0;
+  if (pcts.isNotEmpty) {
+    minPct = pcts.first;
+    maxPct = pcts.first;
+    var sumPct = 0.0;
+    for (final p in pcts) {
+      if (p < minPct) minPct = p;
+      if (p > maxPct) maxPct = p;
+      sumPct += p;
+    }
+    avgPct = sumPct / pcts.length;
+  }
+
+  if (pcts.length == variants.length && (maxPct - minPct) <= 0.6) {
+    return 'الربح الحالي: نسبة مئوية ${_formatCompactNumber(avgPct)}%';
+  }
+  if ((maxDiff - minDiff) <= 0.05) {
+    return 'الربح الحالي: مبلغ ثابت ${InvoiceShareService.formatCurrency(avgDiff)}';
+  }
+  if (pcts.isNotEmpty) {
+    return 'الربح الحالي: متفاوت (من ${_formatCompactNumber(minPct)}% إلى ${_formatCompactNumber(maxPct)}%)';
+  }
+  return 'الربح الحالي: متفاوت (من ${InvoiceShareService.formatCurrency(minDiff)} إلى ${InvoiceShareService.formatCurrency(maxDiff)})';
+}
+
+class _UpdateProfitDialog extends ConsumerStatefulWidget {
+  const _UpdateProfitDialog({
+    required this.onApplied,
+    this.initialBrandId,
+  });
+
+  final String? initialBrandId;
+  final ValueChanged<int> onApplied;
+
+  @override
+  ConsumerState<_UpdateProfitDialog> createState() =>
+      _UpdateProfitDialogState();
+}
+
+class _UpdateProfitDialogState extends ConsumerState<_UpdateProfitDialog> {
+  final _markupCtrl = TextEditingController();
+  late String? _selectedBrandId = widget.initialBrandId;
+  ProfitMarkupType _markupType = ProfitMarkupType.percent;
+  bool _isSaving = false;
+
+  @override
+  void dispose() {
+    _markupCtrl.dispose();
+    super.dispose();
+  }
+
+  double? get _validMarkupValue => _parseProfitMarkupValue(_markupCtrl.text);
+
+  @override
+  Widget build(BuildContext context) {
+    final catalog = ref.watch(catalogProvider);
+    final validBrandIds = {for (final b in catalog.brands) b.id};
+
+    final effectiveBrandId =
+        _selectedBrandId != null && validBrandIds.contains(_selectedBrandId)
+            ? _selectedBrandId
+            : null;
+
+    final templateById = {for (final t in catalog.templates) t.id: t};
+    final brandById = {for (final b in catalog.brands) b.id: b};
+
+    final scopedVariants = [
+      for (final v in catalog.variants)
+        if (effectiveBrandId == null || v.brandId == effectiveBrandId) v,
+    ];
+    final matchingVariants = [
+      for (final v in scopedVariants)
+        if (v.commercialPrice != null) v,
+    ];
+    final skippedWithoutCommercial =
+        scopedVariants.length - matchingVariants.length;
+
+    final currentProfitSummary = _summarizeCurrentProfit(matchingVariants);
+    final markupValue = _validMarkupValue;
+
+    return AlertDialog(
+      title: const Text('تعديل نسبة / قيمة الربح'),
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'إعادة حساب سعر البيع تلقائياً من السعر التجاري المسجل لجميع أصناف الشركة المختارة، دون التأثير على الفواتير المحفوظة مسبقاً.',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String?>(
+                initialValue: effectiveBrandId,
+                decoration: const InputDecoration(labelText: 'الشركة'),
+                items: [
+                  const DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text('كل الشركات'),
+                  ),
+                  for (final b in catalog.brands)
+                    DropdownMenuItem<String?>(
+                      value: b.id,
+                      child: Text(b.name),
+                    ),
+                ],
+                onChanged: _isSaving
+                    ? null
+                    : (v) => setState(() => _selectedBrandId = v),
+              ),
+              if (currentProfitSummary != null) ...[
+                const SizedBox(height: 10),
+                Container(
+                  key: const Key('current_profit_info'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppTheme.primaryColor.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: AppTheme.primaryColor.withValues(alpha: 0.25),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.info_outline,
+                        size: 18,
+                        color: AppTheme.primaryColor,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          currentProfitSummary,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: AppTheme.primaryColor,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (final type in ProfitMarkupType.values)
+                    ChoiceChip(
+                      label: Text(type.arabicLabel),
+                      selected: _markupType == type,
+                      onSelected: _isSaving
+                          ? null
+                          : (_) => setState(() => _markupType = type),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                key: const Key('bulk_profit_markup_field'),
+                controller: _markupCtrl,
+                enabled: !_isSaving,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  labelText: _markupType == ProfitMarkupType.percent
+                      ? 'نسبة الربح الجديدة (%) *'
+                      : 'قيمة الربح الثابتة الجديدة (ج.م) *',
+                  hintText: _markupType == ProfitMarkupType.percent
+                      ? 'مثال: 25'
+                      : 'مثال: 15',
+                ),
+              ),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: matchingVariants.isNotEmpty
+                      ? AppTheme.primaryColor.withValues(alpha: 0.06)
+                      : AppTheme.lowConfidenceColor.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: matchingVariants.isNotEmpty
+                        ? AppTheme.primaryColor.withValues(alpha: 0.25)
+                        : AppTheme.lowConfidenceColor.withValues(alpha: 0.4),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      matchingVariants.isNotEmpty
+                          ? 'سيتم تحديث ${matchingVariants.length} سعر بناءً على السعر التجاري المسجل'
+                          : 'لا توجد أصناف لها سعر تجاري مسجل ضمن النطاق المختار',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: matchingVariants.isNotEmpty
+                            ? AppTheme.highConfidenceColor
+                            : AppTheme.lowConfidenceColor,
+                      ),
+                    ),
+                    if (skippedWithoutCommercial > 0) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'سيتم تخطي $skippedWithoutCommercial سعر بدون سعر تجاري مسجل.',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade700,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (matchingVariants.isNotEmpty && markupValue != null) ...[
+                const SizedBox(height: 10),
+                for (final v in matchingVariants.take(3))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      '• ${templateById[v.itemTemplateId]?.displayLabel ?? "صنف"} — ${brandById[v.brandId]?.name ?? ""}: تجاري ${InvoiceShareService.formatCurrency(v.commercialPrice!)} ← بيع جديد ${InvoiceShareService.formatCurrency(calculateSellingPrice(v.commercialPrice!, _markupType, markupValue))}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isSaving ? null : () => Navigator.pop(context),
+          child: const Text('إلغاء'),
+        ),
+        ElevatedButton.icon(
+          key: const Key('apply_profit_button'),
+          onPressed:
+              _isSaving || matchingVariants.isEmpty || markupValue == null
+                  ? null
+                  : () async {
+                      setState(() => _isSaving = true);
+                      try {
+                        final count = await ref
+                            .read(catalogProvider.notifier)
+                            .applyProfitMarkup(
+                              markupType: _markupType,
+                              markupValue: markupValue,
+                              brandId: effectiveBrandId,
+                            );
+                        if (!context.mounted) return;
+                        Navigator.pop(context);
+                        widget.onApplied(count);
+                      } catch (_) {
+                        if (context.mounted) {
+                          setState(() => _isSaving = false);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('تعذر تحديث نسبة الربح، حاول مجدداً'),
+                            ),
+                          );
+                        }
+                      }
+                    },
+          icon: const Icon(Icons.check_circle_outline),
+          label: Text(_isSaving ? 'جاري التحديث...' : 'تطبيق على الأسعار'),
         ),
       ],
     );

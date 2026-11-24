@@ -6,6 +6,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:sanitary_pricing_app/models/catalog_models.dart';
 import 'package:sanitary_pricing_app/models/invoice_models.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class InvoiceShareService {
   const InvoiceShareService._();
@@ -59,11 +60,47 @@ class InvoiceShareService {
     return buf.toString();
   }
 
+  /// Normalizes Egyptian local phone numbers (e.g. `010...`, Arabic digits)
+  /// into international `wa.me` format (`2010...`). Returns null if invalid.
+  static String? normalizeEgyptianWhatsAppPhone(String? rawPhone) {
+    if (rawPhone == null) return null;
+    const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
+    final western = rawPhone.replaceAllMapped(
+      RegExp(r'[٠-٩]'),
+      (m) => arabicDigits.indexOf(m.group(0)!).toString(),
+    );
+    var digits = western.replaceAll(RegExp(r'\D'), '');
+    if (digits.length < 8) return null;
+    if (digits.startsWith('00')) {
+      digits = digits.substring(2);
+    }
+    if (digits.length < 8) return null;
+    if (digits.length == 11 && digits.startsWith('0')) {
+      return '20${digits.substring(1)}';
+    }
+    if (digits.length == 10 && digits.startsWith('1')) {
+      return '20$digits';
+    }
+    return digits;
+  }
+
+  static Uri buildWhatsAppUri({
+    required InvoiceModel invoice,
+    required ShopSettingsModel shop,
+  }) {
+    final text = buildShareText(invoice, shop);
+    final phone = normalizeEgyptianWhatsAppPhone(invoice.customerPhone);
+    return phone != null
+        ? Uri.https('wa.me', '/$phone', {'text': text})
+        : Uri.https('wa.me', '/', {'text': text});
+  }
+
   static Future<bool> openWhatsApp({
     required InvoiceModel invoice,
     required ShopSettingsModel shop,
   }) async {
-    return shareInvoicePdf(invoice: invoice, shop: shop);
+    final uri = buildWhatsAppUri(invoice: invoice, shop: shop);
+    return launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   static Future<bool> openTelegram({

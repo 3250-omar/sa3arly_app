@@ -191,6 +191,25 @@ class SupabaseRepository {
     }
   }
 
+  /// Batch-upserts variant prices in chunks to speed up bulk profit recalculation.
+  Future<void> upsertVariantsBatch(List<ProductVariantModel> variants) async {
+    if (variants.isEmpty) return;
+    const chunkSize = 100;
+    try {
+      for (var i = 0; i < variants.length; i += chunkSize) {
+        final end =
+            i + chunkSize < variants.length ? i + chunkSize : variants.length;
+        final chunk = variants.sublist(i, end);
+        await _client.from('product_variants').upsert(
+              [for (final v in chunk) v.toJson()],
+              onConflict: 'item_template_id,brand_id',
+            );
+      }
+    } catch (_) {
+      throw const AppException('تعذر تحديث أسعار الأصناف على السيرفر.');
+    }
+  }
+
   Future<void> updateShopSettings(ShopSettingsModel settings) async {
     try {
       final payload = settings.toJson();

@@ -1,3 +1,32 @@
+enum ProfitMarkupType {
+  percent('نسبة مئوية %'),
+  fixed('مبلغ ثابت (ج.م)');
+
+  const ProfitMarkupType(this.arabicLabel);
+  final String arabicLabel;
+}
+
+double calculateSellingPrice(
+  double commercialPrice,
+  ProfitMarkupType type,
+  double value,
+) {
+  final raw = switch (type) {
+    ProfitMarkupType.percent => commercialPrice * (1 + value / 100.0),
+    ProfitMarkupType.fixed => commercialPrice + value,
+  };
+  return (raw * 100).round() / 100.0;
+}
+
+double calculateDiscountedCommercialPrice(
+  double listPrice,
+  double discountPercent,
+) {
+  final clamped = discountPercent.clamp(0.0, 100.0);
+  final raw = listPrice * (1 - clamped / 100.0);
+  return (raw * 100).round() / 100.0;
+}
+
 enum BrandTier {
   economy('شعبي / اقتصادي', 'economy'),
   mid('متوسط', 'mid'),
@@ -122,6 +151,7 @@ class ProductVariantModel {
     required this.itemTemplateId,
     required this.brandId,
     required this.price,
+    this.commercialPrice,
     this.costPrice,
     this.isAvailable = true,
   });
@@ -130,11 +160,14 @@ class ProductVariantModel {
   final String itemTemplateId;
   final String brandId;
   final double price;
+  final double? commercialPrice;
   final double? costPrice;
   final bool isAvailable;
 
   ProductVariantModel copyWith({
     double? price,
+    double? commercialPrice,
+    bool clearCommercialPrice = false,
     double? costPrice,
     bool? isAvailable,
   }) {
@@ -143,6 +176,8 @@ class ProductVariantModel {
       itemTemplateId: itemTemplateId,
       brandId: brandId,
       price: price ?? this.price,
+      commercialPrice:
+          clearCommercialPrice ? null : (commercialPrice ?? this.commercialPrice),
       costPrice: costPrice ?? this.costPrice,
       isAvailable: isAvailable ?? this.isAvailable,
     );
@@ -153,17 +188,21 @@ class ProductVariantModel {
         'item_template_id': itemTemplateId,
         'brand_id': brandId,
         'price': price,
-        'cost_price': costPrice,
+        'commercial_price': commercialPrice,
+        'cost_price': costPrice ?? commercialPrice,
         'is_available': isAvailable,
       };
 
   factory ProductVariantModel.fromJson(Map<String, dynamic> json) {
+    final commercial = (json['commercial_price'] as num?)?.toDouble() ??
+        (json['cost_price'] as num?)?.toDouble();
     return ProductVariantModel(
       id: json['id'] as String,
       itemTemplateId: json['item_template_id'] as String,
       brandId: json['brand_id'] as String,
       price: (json['price'] as num).toDouble(),
-      costPrice: (json['cost_price'] as num?)?.toDouble(),
+      commercialPrice: commercial,
+      costPrice: (json['cost_price'] as num?)?.toDouble() ?? commercial,
       isAvailable: json['is_available'] as bool? ?? true,
     );
   }

@@ -173,11 +173,24 @@ class CatalogNotifier extends Notifier<CatalogState> {
     );
   }
 
+  List<CategoryModel> _filterObsoleteCategories(
+    List<CategoryModel> categories,
+    List<ItemTemplateModel> templates,
+  ) {
+    final usedIds = {for (final t in templates) t.categoryId};
+    return categories
+        .where((c) => !(c.name.trim() == 'وصلات صرف' && !usedIds.contains(c.id)))
+        .toList();
+  }
+
   Future<void> _bootstrap(AuthState auth) async {
     final cached = await LocalCacheService.loadCatalogSnapshot();
     if (cached != null) {
       state = state.copyWith(
-        categories: cached.categories,
+        categories: _filterObsoleteCategories(
+          cached.categories,
+          cached.templates,
+        ),
         brands: cached.brands,
         templates: cached.templates,
         variants: cached.variants,
@@ -212,9 +225,13 @@ class CatalogNotifier extends Notifier<CatalogState> {
       }
 
       final bundle = await repo.fetchFullCatalog();
+      final filteredCategories = _filterObsoleteCategories(
+        bundle.categories,
+        bundle.templates,
+      );
       final syncedAt = DateTime.now();
       state = state.copyWith(
-        categories: bundle.categories,
+        categories: filteredCategories,
         brands: bundle.brands,
         templates: bundle.templates,
         variants: bundle.variants,
@@ -226,7 +243,7 @@ class CatalogNotifier extends Notifier<CatalogState> {
       );
 
       await LocalCacheService.saveCatalogSnapshot(
-        categories: bundle.categories,
+        categories: filteredCategories,
         brands: bundle.brands,
         templates: bundle.templates,
         variants: bundle.variants,
@@ -276,9 +293,15 @@ class CatalogNotifier extends Notifier<CatalogState> {
     state = state.copyWith(isAdminMode: isAdmin);
   }
 
+  String _normalizeCategoryName(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed == 'وصلات صرف') return 'صرف';
+    return trimmed;
+  }
+
   Future<void> addCategory(String name) async {
     if (!state.isAdminMode) return;
-    final clean = name.trim();
+    final clean = _normalizeCategoryName(name);
     if (clean.isEmpty) return;
 
     final exists = state.categories.any(
@@ -408,6 +431,8 @@ class CatalogNotifier extends Notifier<CatalogState> {
     required String itemTemplateId,
     required String brandId,
     required double price,
+    double? commercialPrice,
+    bool clearCommercialPrice = false,
   }) {
     if (!state.isAdminMode || price < 0) return;
     final existingIdx = state.variants.indexWhere(
@@ -419,6 +444,11 @@ class CatalogNotifier extends Notifier<CatalogState> {
     if (existingIdx >= 0) {
       targetVariant = updated[existingIdx].copyWith(
         price: price,
+        commercialPrice: commercialPrice,
+        clearCommercialPrice: clearCommercialPrice,
+        costPrice: clearCommercialPrice
+            ? null
+            : (commercialPrice ?? updated[existingIdx].costPrice),
         isAvailable: true,
       );
       updated[existingIdx] = targetVariant;
@@ -428,6 +458,8 @@ class CatalogNotifier extends Notifier<CatalogState> {
         itemTemplateId: itemTemplateId,
         brandId: brandId,
         price: price,
+        commercialPrice: commercialPrice,
+        costPrice: commercialPrice,
       );
       updated.add(targetVariant);
     }
@@ -478,8 +510,22 @@ class CatalogNotifier extends Notifier<CatalogState> {
   }
 
   /// Imports parsed Excel/CSV rows into the Product Tree (and Supabase if online).
-  Future<int> importCatalogRows(List<CatalogCsvRow> rows) async {
-    if (!state.isAdminMode || rows.isEmpty) return 0;
+  /// When [companyDiscountPercent] > 0, each row's [CatalogCsvRow.price] is
+  /// treated as the company list price before discount, and the discounted
+  /// value is stored as the commercial price before applying [markupType]/[markupValue].
+  Future<int> importCatalogRows(
+    List<CatalogCsvRow> rows, {
+    required ProfitMarkupType markupType,
+    required double markupValue,
+    double companyDiscountPercent = 0,
+  }) async {
+    if (!state.isAdminMode ||
+        rows.isEmpty ||
+        markupValue < 0 ||
+        companyDiscountPercent < 0 ||
+        companyDiscountPercent >= 100) {
+      return 0;
+    }
 
     final categories = [...state.categories];
     final brands = [...state.brands];
@@ -491,19 +537,20 @@ class CatalogNotifier extends Notifier<CatalogState> {
 
     for (final row in rows) {
       // 1. Find or create Category
+      final categoryName = _normalizeCategoryName(row.categoryName);
       var cat = categories.where(
-        (c) => c.name.trim().toLowerCase() == row.categoryName.toLowerCase(),
+        (c) => c.name.trim().toLowerCase() == categoryName.toLowerCase(),
       ).firstOrNull;
       if (cat == null) {
         if (repo != null) {
           cat = await repo.ensureCategory(
-            row.categoryName,
+            categoryName,
             sortOrder: categories.length + 1,
           );
         } else {
           cat = CategoryModel(
             id: _uuid.v4(),
-            name: row.categoryName,
+            name: categoryName,
             sortOrder: categories.length + 1,
           );
         }
@@ -549,14 +596,24 @@ class CatalogNotifier extends Notifier<CatalogState> {
         createdTemplate = true;
       }
 
-      // 4. Upsert Variant price
+      // 4. Upsert Variant commercial & selling prices
+      final commercialPrice = companyDiscountPercent > 0
+          ? calculateDiscountedCommercialPrice(
+              row.price,
+              companyDiscountPercent,
+            )
+          : row.price;
+      final sellingPrice =
+          calculateSellingPrice(commercialPrice, markupType, markupValue);
       final existingIdx = variants.indexWhere(
         (v) => v.itemTemplateId == template!.id && v.brandId == brand!.id,
       );
       late final ProductVariantModel variant;
       if (existingIdx >= 0) {
         variant = variants[existingIdx].copyWith(
-          price: row.price,
+          price: sellingPrice,
+          commercialPrice: commercialPrice,
+          costPrice: commercialPrice,
           isAvailable: true,
         );
         variants[existingIdx] = variant;
@@ -565,7 +622,9 @@ class CatalogNotifier extends Notifier<CatalogState> {
           id: _uuid.v4(),
           itemTemplateId: template.id,
           brandId: brand.id,
-          price: row.price,
+          price: sellingPrice,
+          commercialPrice: commercialPrice,
+          costPrice: commercialPrice,
         );
         variants.add(variant);
       }
@@ -592,6 +651,57 @@ class CatalogNotifier extends Notifier<CatalogState> {
     );
     await _persistSnapshot();
     return processed;
+  }
+
+  /// Recalculates selling prices from stored [ProductVariantModel.commercialPrice]
+  /// for variants matching the optional [brandId] and [categoryId] filters.
+  Future<int> applyProfitMarkup({
+    required ProfitMarkupType markupType,
+    required double markupValue,
+    String? brandId,
+    String? categoryId,
+  }) async {
+    if (!state.isAdminMode || markupValue < 0) return 0;
+
+    final allowedTemplateIds = categoryId == null
+        ? null
+        : {
+            for (final t in state.templates)
+              if (t.categoryId == categoryId) t.id,
+          };
+
+    final updatedVariants = <ProductVariantModel>[];
+    final changedVariants = <ProductVariantModel>[];
+
+    for (final v in state.variants) {
+      final matchesBrand = brandId == null || v.brandId == brandId;
+      final matchesCategory =
+          allowedTemplateIds == null ||
+          allowedTemplateIds.contains(v.itemTemplateId);
+
+      if (v.commercialPrice != null && matchesBrand && matchesCategory) {
+        final newSellingPrice = calculateSellingPrice(
+          v.commercialPrice!,
+          markupType,
+          markupValue,
+        );
+        final updated = v.copyWith(price: newSellingPrice);
+        updatedVariants.add(updated);
+        changedVariants.add(updated);
+      } else {
+        updatedVariants.add(v);
+      }
+    }
+
+    if (changedVariants.isEmpty) return 0;
+
+    if (!AppConfig.isDemoMode) {
+      await SupabaseRepository().upsertVariantsBatch(changedVariants);
+    }
+
+    state = state.copyWith(variants: updatedVariants);
+    await _persistSnapshot();
+    return changedVariants.length;
   }
 }
 

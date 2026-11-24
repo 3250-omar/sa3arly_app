@@ -324,6 +324,106 @@ class DemoCatalogData {
       aliasText: 'بيبة',
       itemTemplateId: '33333333-3333-3333-3333-333333333315',
     ),
+    ItemAliasModel(
+      id: 'a6',
+      aliasText: 'كوع نتاية نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333303',
+    ),
+    ItemAliasModel(
+      id: 'a7',
+      aliasText: 'كوع دكر نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333304',
+    ),
+    ItemAliasModel(
+      id: 'a8',
+      aliasText: 'تيه نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333305',
+    ),
+    ItemAliasModel(
+      id: 'a9',
+      aliasText: 'قسام نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333305',
+    ),
+    ItemAliasModel(
+      id: 'a10',
+      aliasText: 'مشترك تلات ارباع',
+      itemTemplateId: '33333333-3333-3333-3333-333333333306',
+    ),
+    ItemAliasModel(
+      id: 'a11',
+      aliasText: 'مشترك بسن نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333307',
+    ),
+    ItemAliasModel(
+      id: 'a12',
+      aliasText: 'جلبة نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333308',
+    ),
+    ItemAliasModel(
+      id: 'a13',
+      aliasText: 'جلبة وصل نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333308',
+    ),
+    ItemAliasModel(
+      id: 'a14',
+      aliasText: 'عود بولي نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333309',
+    ),
+    ItemAliasModel(
+      id: 'a15',
+      aliasText: 'عود بولي تلات ارباع',
+      itemTemplateId: '33333333-3333-3333-3333-333333333310',
+    ),
+    ItemAliasModel(
+      id: 'a16',
+      aliasText: 'نبل نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333311',
+    ),
+    ItemAliasModel(
+      id: 'a17',
+      aliasText: 'ماسورة صرف 4 بوصة',
+      itemTemplateId: '33333333-3333-3333-3333-333333333312',
+    ),
+    ItemAliasModel(
+      id: 'a18',
+      aliasText: 'كوع مفتوح 4 بوصة',
+      itemTemplateId: '33333333-3333-3333-3333-333333333313',
+    ),
+    ItemAliasModel(
+      id: 'a19',
+      aliasText: 'كوع قفل 2 بوصة',
+      itemTemplateId: '33333333-3333-3333-3333-333333333314',
+    ),
+    ItemAliasModel(
+      id: 'a20',
+      aliasText: 'بالوعة حمام',
+      itemTemplateId: '33333333-3333-3333-3333-333333333315',
+    ),
+    ItemAliasModel(
+      id: 'a21',
+      aliasText: 'محبس حائط نص',
+      itemTemplateId: '33333333-3333-3333-3333-333333333316',
+    ),
+    ItemAliasModel(
+      id: 'a22',
+      aliasText: 'محبس شطاف',
+      itemTemplateId: '33333333-3333-3333-3333-333333333317',
+    ),
+    ItemAliasModel(
+      id: 'a23',
+      aliasText: 'شجرة مطبخ',
+      itemTemplateId: '33333333-3333-3333-3333-333333333318',
+    ),
+    ItemAliasModel(
+      id: 'a24',
+      aliasText: 'شعر وتفلون',
+      itemTemplateId: '33333333-3333-3333-3333-333333333319',
+    ),
+    ItemAliasModel(
+      id: 'a25',
+      aliasText: 'غراء صرف',
+      itemTemplateId: '33333333-3333-3333-3333-333333333320',
+    ),
   ];
 
   static List<InvoiceModel> initialInvoices() {
