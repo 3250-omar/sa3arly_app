@@ -34,6 +34,49 @@ enum DiscountType {
   }
 }
 
+enum PaymentMethod {
+  cash('كاش', 'cash'),
+  partialNowRestLater('جزء الآن وجزء بعد الانتهاء', 'partial_now_rest_later'),
+  deferredNoDeposit('آجل بدون مقدم', 'deferred_no_deposit'),
+  deferredWithDeposit('آجل بمقدم', 'deferred_with_deposit');
+
+  const PaymentMethod(this.arabicLabel, this.dbValue);
+  final String arabicLabel;
+  final String dbValue;
+
+  bool get requiresPaidNow =>
+      this == PaymentMethod.partialNowRestLater ||
+      this == PaymentMethod.deferredWithDeposit;
+
+  bool get requiresDueDate => this != PaymentMethod.cash;
+
+  String get paidAmountLabel => switch (this) {
+        PaymentMethod.partialNowRestLater => 'المبلغ المدفوع الآن (ج.م) *',
+        PaymentMethod.deferredWithDeposit => 'قيمة المقدم (ج.م) *',
+        _ => 'المبلغ المدفوع (ج.م)',
+      };
+
+  String get dueDateLabel => switch (this) {
+        PaymentMethod.partialNowRestLater => 'موعد سداد الباقي بعد الانتهاء *',
+        PaymentMethod.deferredWithDeposit => 'موعد سداد باقي المبلغ *',
+        PaymentMethod.deferredNoDeposit => 'موعد السداد المتفق عليه *',
+        PaymentMethod.cash => 'موعد السداد',
+      };
+
+  static PaymentMethod fromString(String? value) {
+    switch (value) {
+      case 'partial_now_rest_later':
+        return PaymentMethod.partialNowRestLater;
+      case 'deferred_no_deposit':
+        return PaymentMethod.deferredNoDeposit;
+      case 'deferred_with_deposit':
+        return PaymentMethod.deferredWithDeposit;
+      default:
+        return PaymentMethod.cash;
+    }
+  }
+}
+
 enum OcrConfidence {
   high('مؤكد', 'high'),
   medium('محتاج مراجعة', 'medium'),
@@ -179,6 +222,9 @@ class InvoiceModel {
     this.technicianName,
     this.discountType = DiscountType.none,
     this.discountValue = 0,
+    this.paymentMethod = PaymentMethod.cash,
+    this.paidAmount = 0,
+    this.paymentDueDate,
     this.notes,
     this.imagePaths = const [],
     this.localScanImages = const [],
@@ -200,6 +246,9 @@ class InvoiceModel {
   final String? technicianName;
   final DiscountType discountType;
   final double discountValue;
+  final PaymentMethod paymentMethod;
+  final double paidAmount;
+  final DateTime? paymentDueDate;
   final String? notes;
   final List<String> imagePaths;
 
@@ -211,6 +260,30 @@ class InvoiceModel {
 
   bool get hasTechnician =>
       technicianName != null && technicianName!.trim().isNotEmpty;
+
+  double get effectivePaidAmount => switch (paymentMethod) {
+        PaymentMethod.cash => total,
+        PaymentMethod.deferredNoDeposit => 0.0,
+        PaymentMethod.partialNowRestLater ||
+        PaymentMethod.deferredWithDeposit =>
+          paidAmount.clamp(0.0, total),
+      };
+
+  double get remainingAmount =>
+      (total - effectivePaidAmount).clamp(0.0, double.infinity);
+
+  bool get isPaymentDueOrOverdue {
+    if (status != InvoiceStatus.approved) return false;
+    if (paymentDueDate == null || remainingAmount <= 0) return false;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final due = DateTime(
+      paymentDueDate!.year,
+      paymentDueDate!.month,
+      paymentDueDate!.day,
+    );
+    return !due.isAfter(today);
+  }
 
   List<String> get distinctBrandNames {
     final seen = <String>{};
@@ -266,6 +339,10 @@ class InvoiceModel {
     String? technicianName,
     DiscountType? discountType,
     double? discountValue,
+    PaymentMethod? paymentMethod,
+    double? paidAmount,
+    DateTime? paymentDueDate,
+    bool clearPaymentDueDate = false,
     String? notes,
     List<String>? imagePaths,
     List<Uint8List>? localScanImages,
@@ -285,6 +362,10 @@ class InvoiceModel {
       technicianName: technicianName ?? this.technicianName,
       discountType: discountType ?? this.discountType,
       discountValue: discountValue ?? this.discountValue,
+      paymentMethod: paymentMethod ?? this.paymentMethod,
+      paidAmount: paidAmount ?? this.paidAmount,
+      paymentDueDate:
+          clearPaymentDueDate ? null : (paymentDueDate ?? this.paymentDueDate),
       notes: notes ?? this.notes,
       imagePaths: imagePaths ?? this.imagePaths,
       localScanImages: localScanImages ?? this.localScanImages,
@@ -292,6 +373,14 @@ class InvoiceModel {
       createdAt: createdAt ?? this.createdAt,
       items: items ?? this.items,
     );
+  }
+
+  static String? formatDateOnly(DateTime? d) {
+    if (d == null) return null;
+    final y = d.year.toString().padLeft(4, '0');
+    final m = d.month.toString().padLeft(2, '0');
+    final day = d.day.toString().padLeft(2, '0');
+    return '$y-$m-$day';
   }
 
   Map<String, dynamic> toDbRow() => {
@@ -307,6 +396,10 @@ class InvoiceModel {
             hasTechnician ? technicianName!.trim() : null,
         'discount_type': discountType.dbValue,
         'discount_value': discountValue,
+        'payment_method': paymentMethod.dbValue,
+        'paid_amount': effectivePaidAmount,
+        'payment_due_date':
+            paymentMethod.requiresDueDate ? formatDateOnly(paymentDueDate) : null,
         'subtotal': subtotal,
         'total': total,
         'notes': notes,
@@ -355,6 +448,11 @@ class InvoiceModel {
       technicianName: json['technician_name'] as String?,
       discountType: DiscountType.fromString(json['discount_type'] as String?),
       discountValue: (json['discount_value'] as num?)?.toDouble() ?? 0,
+      paymentMethod: PaymentMethod.fromString(json['payment_method'] as String?),
+      paidAmount: (json['paid_amount'] as num?)?.toDouble() ?? 0,
+      paymentDueDate: json['payment_due_date'] != null
+          ? DateTime.tryParse(json['payment_due_date'].toString())
+          : null,
       notes: json['notes'] as String?,
       imagePaths: ((json['image_paths'] as List?) ?? const [])
           .map((e) => e.toString())

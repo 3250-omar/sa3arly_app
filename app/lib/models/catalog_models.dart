@@ -1,3 +1,11 @@
+enum ImportPriceMode {
+  commercial('أسعار تجارية (قبل الربح)'),
+  selling('أسعار بيع جاهزة');
+
+  const ImportPriceMode(this.arabicLabel);
+  final String arabicLabel;
+}
+
 enum ProfitMarkupType {
   percent('نسبة مئوية %'),
   fixed('مبلغ ثابت (ج.م)');

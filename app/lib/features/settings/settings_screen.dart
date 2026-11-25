@@ -21,6 +21,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late final TextEditingController _phoneCtrl;
   late final TextEditingController _addressCtrl;
   bool _isDirty = false;
+  String _aliasSearch = '';
 
   @override
   void initState() {
@@ -37,6 +38,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _phoneCtrl.dispose();
     _addressCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _showAliasEditorDialog({ItemAliasModel? existing}) async {
+    final catalog = ref.read(catalogProvider);
+    if (!catalog.isAdminMode) return;
+    if (catalog.templates.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا توجد أصناف مسجلة للربط بها حالياً')),
+      );
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _AliasEditorDialog(
+        existing: existing,
+        onSaved: (message) {
+          messenger.showSnackBar(SnackBar(content: Text(message)));
+        },
+      ),
+    );
   }
 
   @override
@@ -290,30 +312,84 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             children: [
               const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      key: const Key('alias_search_field'),
+                      onChanged: (v) => setState(() => _aliasSearch = v),
+                      decoration: const InputDecoration(
+                        hintText: 'ابحث في القاموس...',
+                        prefixIcon: Icon(Icons.search, size: 18),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  if (catalog.isAdminMode) ...[
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      key: const Key('add_alias_button'),
+                      onPressed: () => _showAliasEditorDialog(),
+                      icon: const Icon(Icons.add, size: 18),
+                      label: const Text('إضافة مسمى'),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 10),
               Align(
                 alignment: AlignmentDirectional.centerStart,
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final alias in catalog.aliases)
-                      Builder(
-                        builder: (context) {
-                          final t = catalog.findTemplate(alias.itemTemplateId);
-                          return Chip(
-                            label: Text(
-                              '${alias.aliasText} ← ${t?.displayLabel ?? ""}',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                            onDeleted: catalog.isAdminMode
-                                ? () => ref
-                                    .read(catalogProvider.notifier)
-                                    .deleteAlias(alias.id)
-                                : null,
-                          );
-                        },
-                      ),
-                  ],
+                child: Builder(
+                  builder: (context) {
+                    final q = _aliasSearch.trim().toLowerCase();
+                    final visibleAliases = catalog.aliases.where((alias) {
+                      if (q.isEmpty) return true;
+                      final t = catalog.findTemplate(alias.itemTemplateId);
+                      return alias.aliasText.toLowerCase().contains(q) ||
+                          (t?.displayLabel.toLowerCase().contains(q) ?? false);
+                    }).toList();
+
+                    if (visibleAliases.isEmpty) {
+                      return Text(
+                        'لا توجد مسميات مطابقة للبحث',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade700,
+                        ),
+                      );
+                    }
+
+                    return Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final alias in visibleAliases)
+                          Builder(
+                            builder: (context) {
+                              final t =
+                                  catalog.findTemplate(alias.itemTemplateId);
+                              return InputChip(
+                                label: Text(
+                                  '${alias.aliasText} ← ${t?.displayLabel ?? ""}',
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                                tooltip:
+                                    catalog.isAdminMode ? 'اضغط للتعديل' : null,
+                                onPressed: catalog.isAdminMode
+                                    ? () =>
+                                        _showAliasEditorDialog(existing: alias)
+                                    : null,
+                                onDeleted: catalog.isAdminMode
+                                    ? () => ref
+                                        .read(catalogProvider.notifier)
+                                        .deleteAlias(alias.id)
+                                    : null,
+                              );
+                            },
+                          ),
+                      ],
+                    );
+                  },
                 ),
               ),
             ],
@@ -412,6 +488,196 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'خدمة InvoicePrinterService مجهزة في الكود لربط طابعات الريسيت الحرارية Bluetooth أو طابعات Wi-Fi لاحقاً، وحالياً يتوفر التصدير كـ PDF للطباعة.',
             ),
           ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AliasEditorDialog extends ConsumerStatefulWidget {
+  const _AliasEditorDialog({
+    required this.onSaved,
+    this.existing,
+  });
+
+  final ItemAliasModel? existing;
+  final ValueChanged<String> onSaved;
+
+  @override
+  ConsumerState<_AliasEditorDialog> createState() => _AliasEditorDialogState();
+}
+
+class _AliasEditorDialogState extends ConsumerState<_AliasEditorDialog> {
+  late final TextEditingController _aliasCtrl;
+  final TextEditingController _templateSearchCtrl = TextEditingController();
+  late String _selectedTemplateId;
+  bool _isSaving = false;
+  String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    _aliasCtrl = TextEditingController(text: widget.existing?.aliasText ?? '');
+    final templates = ref.read(catalogProvider).templates;
+    _selectedTemplateId = widget.existing?.itemTemplateId ??
+        (templates.isNotEmpty ? templates.first.id : '');
+  }
+
+  @override
+  void dispose() {
+    _aliasCtrl.dispose();
+    _templateSearchCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final catalog = ref.watch(catalogProvider);
+    final isEditing = widget.existing != null;
+    final query = _templateSearchCtrl.text.trim().toLowerCase();
+
+    final matchingTemplates = catalog.templates.where((t) {
+      if (query.isEmpty) return true;
+      return t.displayLabel.toLowerCase().contains(query);
+    }).toList();
+
+    return AlertDialog(
+      title: Text(isEditing ? 'تعديل مسمى في القاموس' : 'إضافة مسمى جديد للقاموس'),
+      content: SizedBox(
+        width: 440,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                key: const Key('alias_text_field'),
+                controller: _aliasCtrl,
+                enabled: !_isSaving,
+                onChanged: (_) {
+                  if (_errorText != null) setState(() => _errorText = null);
+                },
+                decoration: const InputDecoration(
+                  labelText: 'مسمى السباك الدارج *',
+                  hintText: 'مثال: كوع نتاية نص / بيبة 3 مخرج',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('alias_template_search_field'),
+                controller: _templateSearchCtrl,
+                enabled: !_isSaving,
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  labelText: 'ابحث عن الصنف المرتبط بالكتالوج',
+                  prefixIcon: Icon(Icons.search, size: 18),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                height: 220,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade300),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: matchingTemplates.isEmpty
+                    ? const Center(child: Text('لا توجد أصناف مطابقة'))
+                    : ListView.separated(
+                        itemCount: matchingTemplates.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (ctx, idx) {
+                          final t = matchingTemplates[idx];
+                          final selected = t.id == _selectedTemplateId;
+                          return ListTile(
+                            dense: true,
+                            leading: Icon(
+                              selected
+                                  ? Icons.radio_button_checked
+                                  : Icons.radio_button_off,
+                              color: selected
+                                  ? AppTheme.primaryColor
+                                  : Colors.grey,
+                              size: 20,
+                            ),
+                            title: Text(
+                              t.displayLabel,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: selected
+                                    ? FontWeight.w700
+                                    : FontWeight.normal,
+                              ),
+                            ),
+                            onTap: _isSaving
+                                ? null
+                                : () =>
+                                    setState(() => _selectedTemplateId = t.id),
+                          );
+                        },
+                      ),
+              ),
+              if (_errorText != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _errorText!,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.lowConfidenceColor,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isSaving ? null : () => Navigator.pop(context),
+          child: const Text('إلغاء'),
+        ),
+        ElevatedButton.icon(
+          key: const Key('save_alias_button'),
+          onPressed: _isSaving || _selectedTemplateId.isEmpty
+              ? null
+              : () async {
+                  final text = _aliasCtrl.text.trim();
+                  if (text.isEmpty) {
+                    setState(() => _errorText = 'مطلوب كتابة المسمى الدارج');
+                    return;
+                  }
+                  setState(() {
+                    _isSaving = true;
+                    _errorText = null;
+                  });
+                  final notifier = ref.read(catalogProvider.notifier);
+                  final err = isEditing
+                      ? await notifier.updateAlias(
+                          aliasId: widget.existing!.id,
+                          aliasText: text,
+                          itemTemplateId: _selectedTemplateId,
+                        )
+                      : await notifier.addAlias(
+                          aliasText: text,
+                          itemTemplateId: _selectedTemplateId,
+                        );
+                  if (!context.mounted) return;
+                  if (err != null) {
+                    setState(() {
+                      _isSaving = false;
+                      _errorText = err;
+                    });
+                    return;
+                  }
+                  Navigator.pop(context);
+                  widget.onSaved(
+                    isEditing
+                        ? 'تم تحديث المسمى في القاموس بنجاح'
+                        : 'تمت إضافة المسمى للقاموس بنجاح',
+                  );
+                },
+          icon: const Icon(Icons.save_outlined),
+          label: Text(_isSaving ? 'جاري الحفظ...' : (isEditing ? 'تحديث' : 'إضافة')),
         ),
       ],
     );

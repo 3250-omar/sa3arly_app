@@ -9,12 +9,12 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const GITHUB_WAVE_1 = ["openai/gpt-4.1-mini"];
 const GITHUB_WAVE_2 = ["openai/gpt-4o-mini"];
 const OPENROUTER_WAVE_1 = [
-  "google/gemma-4-31b-it:free",
-  "google/gemma-4-26b-a4b-it:free",
+  "openrouter/free",
+  "nvidia/nemotron-3.5-super-vl:free",
 ];
 const OPENROUTER_WAVE_2 = [
-  "nvidia/nemotron-3.5-super-vl:free",
-  "openrouter/free",
+  "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
 ];
 
 const UUID_RE =
@@ -405,7 +405,7 @@ async function attemptOpenAiCompatible(
     res = await fetchJsonWithTimeout(
       endpoint,
       { method: "POST", headers, body: JSON.stringify(basePayload) },
-      timeoutMs,
+      Math.min(timeoutMs, 10000),
       signal,
     );
   }
@@ -529,17 +529,21 @@ function buildCompactCatalog(
   }
 
   if (aliases.length > 0) {
-    ctxLines.push("المسميات (alias=>tid):");
+    // Keep prompt compact by including up to 20 sample aliases; deterministic aliasMap still checks all rows.
     const pairs: string[] = [];
     for (const a of aliases) {
       const tid = templateIdToIdx.get(a.item_template_id);
       const cleanedAlias = stripLeadingQty(a.alias_text);
       if (tid && cleanedAlias) {
         pairs.push(`${cleanedAlias}=>${tid}`);
+        if (pairs.length >= 20) break;
       }
     }
-    for (let i = 0; i < pairs.length; i += 10) {
-      ctxLines.push(pairs.slice(i, i + 10).join(" | "));
+    if (pairs.length > 0) {
+      ctxLines.push("أمثلة مسميات (alias=>tid):");
+      for (let i = 0; i < pairs.length; i += 10) {
+        ctxLines.push(pairs.slice(i, i + 10).join(" | "));
+      }
     }
   }
 
@@ -722,7 +726,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   let lastStatus = 503;
   let lastDetail = "AI service temporarily busy";
 
-  // Wave 1: Parallel fast free race — GitHub gpt-4.1-mini + OpenRouter Gemma 4 (12s strict end-to-end)
+  // Wave 1: Parallel fast free race — GitHub gpt-4.1-mini + OpenRouter auto router / Nemotron (15s strict end-to-end)
   const wave1Factories: Array<(s: AbortSignal) => Promise<WaveResult>> = [];
   if (githubToken) {
     for (const m of GITHUB_WAVE_1) {
@@ -735,7 +739,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           prompt,
           catalog.ctx,
           imgs,
-          12000,
+          15000,
           sig,
           { includeDetailHigh: true },
         ),
@@ -753,7 +757,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           prompt,
           catalog.ctx,
           imgs,
-          12000,
+          15000,
           sig,
           {
             extraBody: { reasoning: { enabled: false } },
@@ -768,7 +772,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
   lastStatus = w1.lastStatus;
   lastDetail = w1.lastDetail;
 
-  // Wave 2: Parallel free fallback — GitHub gpt-4o-mini + OpenRouter Nemotron/Router (18s strict end-to-end)
+  // Wave 2: Parallel free fallback — GitHub gpt-4o-mini + OpenRouter Gemma 4 (15s strict end-to-end)
   if (!winner) {
     const wave2Factories: Array<(s: AbortSignal) => Promise<WaveResult>> = [];
     if (githubToken) {
@@ -782,7 +786,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             prompt,
             catalog.ctx,
             imgs,
-            18000,
+            15000,
             sig,
             { includeDetailHigh: true },
           ),
@@ -800,7 +804,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             prompt,
             catalog.ctx,
             imgs,
-            18000,
+            15000,
             sig,
             {
               extraBody: { reasoning: { enabled: false } },

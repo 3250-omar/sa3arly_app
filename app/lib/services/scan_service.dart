@@ -22,8 +22,9 @@ class ScanService {
 
   static Future<List<Uint8List>> pickImagesFromGallery() async {
     final files = await _picker.pickMultiImage(
-      imageQuality: 72,
-      maxWidth: 1280,
+      imageQuality: 65,
+      maxWidth: 1024,
+      maxHeight: 1600,
     );
     final result = <Uint8List>[];
     for (final file in files.take(maxImages)) {
@@ -38,8 +39,9 @@ class ScanService {
   static Future<Uint8List?> pickImageFromCamera() async {
     final file = await _picker.pickImage(
       source: ImageSource.camera,
-      imageQuality: 72,
-      maxWidth: 1280,
+      imageQuality: 65,
+      maxWidth: 1024,
+      maxHeight: 1600,
     );
     if (file == null) return null;
     final bytes = await file.readAsBytes();
@@ -135,7 +137,7 @@ class ScanService {
               'preferred_brand_id': explicitPreferredBrand?.id,
             },
           )
-          .timeout(const Duration(seconds: 35));
+          .timeout(const Duration(seconds: 60));
     } on TimeoutException {
       throw const AppException(
         'استغرق تحليل الصورة وقتاً أطول من المتوقع، حاول مرة أخرى.',

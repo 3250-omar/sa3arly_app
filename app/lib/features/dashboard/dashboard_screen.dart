@@ -155,10 +155,66 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         invoices.where((i) => i.status == InvoiceStatus.approved).toList();
     final approvedTotal =
         approvedInvoices.fold(0.0, (sum, inv) => sum + inv.total);
+    final dueTodayInvoices =
+        invoices.where((i) => i.isPaymentDueOrOverdue).toList();
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        if (dueTodayInvoices.isNotEmpty) ...[
+          Card(
+            key: const Key('due_payments_banner'),
+            color: AppTheme.mediumConfidenceBg,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.notifications_active_outlined,
+                        color: AppTheme.mediumConfidenceColor,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'تنبيهات تحصيل اليوم (${dueTodayInvoices.length})',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                          color: AppTheme.mediumConfidenceColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  for (final dueInv in dueTodayInvoices)
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        'المفروض ${dueInv.customerName.trim().isEmpty ? "العميل" : dueInv.customerName.trim()} يجيب ${InvoiceShareService.formatCurrency(dueInv.remainingAmount)} النهارده',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
+                      ),
+                      subtitle: Text(
+                        '${dueInv.invoiceNumber} • ${dueInv.paymentMethod.arabicLabel} • الموعد: ${InvoiceModel.formatDateOnly(dueInv.paymentDueDate)}',
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {
+                        ref.read(activeDraftProvider.notifier).setDraft(dueInv);
+                        context.push('/review');
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         // Hero AI Scan Card
         Container(
           padding: const EdgeInsets.all(20),

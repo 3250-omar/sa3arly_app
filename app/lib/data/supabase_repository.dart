@@ -241,6 +241,50 @@ class SupabaseRepository {
     }
   }
 
+  Future<ItemAliasModel> addAlias({
+    required String aliasText,
+    required String itemTemplateId,
+  }) async {
+    try {
+      final row = await _client
+          .from('item_aliases')
+          .insert({
+            'alias_text': aliasText.trim(),
+            'item_template_id': itemTemplateId,
+          })
+          .select()
+          .single();
+      return ItemAliasModel.fromJson(Map<String, dynamic>.from(row));
+    } on PostgrestException catch (e) {
+      if (e.code == '23505') {
+        throw const AppException('هذا المسمى مسجل بالفعل في القاموس.');
+      }
+      throw const AppException('تعذر حفظ المسمى في القاموس.');
+    } catch (_) {
+      throw const AppException('تعذر حفظ المسمى في القاموس.');
+    }
+  }
+
+  Future<void> updateAlias({
+    required String aliasId,
+    required String aliasText,
+    required String itemTemplateId,
+  }) async {
+    try {
+      await _client.from('item_aliases').update({
+        'alias_text': aliasText.trim(),
+        'item_template_id': itemTemplateId,
+      }).eq('id', aliasId);
+    } on PostgrestException catch (e) {
+      if (e.code == '23505') {
+        throw const AppException('هذا المسمى مسجل بالفعل في القاموس.');
+      }
+      throw const AppException('تعذر تحديث المسمى في القاموس.');
+    } catch (_) {
+      throw const AppException('تعذر تحديث المسمى في القاموس.');
+    }
+  }
+
   Future<void> deleteAlias(String aliasId) async {
     try {
       await _client.from('item_aliases').delete().eq('id', aliasId);

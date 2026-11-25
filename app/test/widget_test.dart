@@ -154,6 +154,11 @@ void main() {
 
       await tester.tap(find.text('إدراج نموذج جاهز'));
       await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const Key('import_price_mode_commercial')),
+      );
+      await tester.tap(find.byKey(const Key('import_price_mode_commercial')));
+      await tester.pumpAndSettle();
 
       // Mandatory profit validation must prevent importing before entering markup
       expect(
@@ -165,6 +170,7 @@ void main() {
       // Dialog remains open because markup is mandatory
       expect(find.byKey(const Key('profit_markup_field')), findsOneWidget);
 
+      await tester.ensureVisible(find.byKey(const Key('profit_markup_field')));
       await tester.enterText(
         find.byKey(const Key('profit_markup_field')),
         '20',
@@ -788,6 +794,12 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('إدراج نموذج جاهز'));
       await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const Key('import_price_mode_commercial')),
+      );
+      await tester.tap(find.byKey(const Key('import_price_mode_commercial')));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const Key('profit_markup_field')));
       await tester.enterText(
         find.byKey(const Key('profit_markup_field')),
         '20',
@@ -907,6 +919,12 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('إدراج نموذج جاهز'));
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(
+        find.byKey(const Key('import_price_mode_commercial')),
+      );
+      await tester.tap(find.byKey(const Key('import_price_mode_commercial')));
       await tester.pumpAndSettle();
 
       await tester.ensureVisible(find.byKey(const Key('company_discount_toggle')));
@@ -1060,6 +1078,324 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('تم اعتماد الفاتورة بنجاح'), findsNothing);
+    },
+  );
+
+  test(
+    'PaymentMethod and InvoiceModel compute paid/remaining amounts, DB payload, and share text',
+    () {
+      final inv = InvoiceModel(
+        id: 'pay-1',
+        invoiceNumber: 'INV-00100',
+        status: InvoiceStatus.approved,
+        customerName: 'حسن إبراهيم',
+        paymentMethod: PaymentMethod.deferredWithDeposit,
+        paidAmount: 400,
+        paymentDueDate: DateTime(2026, 12, 10),
+        createdAt: DateTime(2026, 11, 25),
+        items: const [
+          InvoiceItemModel(
+            id: 'pi-1',
+            itemName: 'ماسورة',
+            quantity: 10,
+            unitPrice: 100,
+          ),
+        ],
+      );
+
+      expect(inv.total, 1000);
+      expect(inv.effectivePaidAmount, 400);
+      expect(inv.remainingAmount, 600);
+
+      final dbRow = inv.toDbRow();
+      expect(dbRow['payment_method'], 'deferred_with_deposit');
+      expect(dbRow['paid_amount'], 400);
+      expect(dbRow['payment_due_date'], '2026-12-10');
+
+      final decoded = InvoiceModel.fromJson({
+        ...inv.toCacheJson(),
+        'invoice_items': const [],
+      });
+      expect(decoded.paymentMethod, PaymentMethod.deferredWithDeposit);
+      expect(decoded.paidAmount, 400);
+      expect(decoded.paymentDueDate, DateTime(2026, 12, 10));
+
+      final shareText = InvoiceShareService.buildShareText(
+        inv,
+        DemoCatalogData.defaultSettings,
+      );
+      expect(shareText, contains('طريقة التحصيل: آجل بمقدم'));
+      expect(shareText, contains('المدفوع / المقدم: 400 ج.م'));
+      expect(shareText, contains('المتبقي: 600 ج.م'));
+      expect(shareText, contains('موعد السداد: 2026-12-10'));
+    },
+  );
+
+  testWidgets(
+    'ReviewScreen shows conditional payment collection fields and validates due date on approval',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('تسعير ورقة جديدة (AI)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('تجربة كشف تجريبي جاهز (AI Demo)'));
+      await tester.pumpAndSettle();
+
+      // Scroll down to Payment Collection Card in the lazy ListView
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('payment_method_dropdown')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      // Default is cash — paid_amount_field and payment_due_date_picker are hidden
+      expect(find.byKey(const Key('payment_method_dropdown')), findsOneWidget);
+      expect(find.byKey(const Key('paid_amount_field')), findsNothing);
+      expect(find.byKey(const Key('payment_due_date_picker')), findsNothing);
+
+      // 1. Switch to partialNowRestLater -> shows both paid_amount_field & payment_due_date_picker
+      await tester.tap(find.byKey(const Key('payment_method_dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('جزء الآن وجزء بعد الانتهاء').last);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('paid_amount_field')), findsOneWidget);
+      expect(find.byKey(const Key('payment_due_date_picker')), findsOneWidget);
+
+      // 2. Switch to deferredNoDeposit -> hides paid_amount_field, keeps payment_due_date_picker
+      await tester.ensureVisible(
+        find.byKey(const Key('payment_method_dropdown')),
+      );
+      await tester.tap(find.byKey(const Key('payment_method_dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('آجل بدون مقدم').last);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('paid_amount_field')), findsNothing);
+      expect(find.byKey(const Key('payment_due_date_picker')), findsOneWidget);
+
+      // Approval must block without due date
+      await tester.tap(find.textContaining('اعتماد ('));
+      await tester.pumpAndSettle();
+      expect(find.text('مطلوب تحديد موعد السداد'), findsOneWidget);
+
+      // 3. Switch to deferredWithDeposit -> shows both deposit field & due date picker
+      await tester.ensureVisible(
+        find.byKey(const Key('payment_method_dropdown')),
+      );
+      await tester.tap(find.byKey(const Key('payment_method_dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('آجل بمقدم').last);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('paid_amount_field')), findsOneWidget);
+      expect(find.byKey(const Key('payment_due_date_picker')), findsOneWidget);
+    },
+  );
+
+  test(
+    'CatalogNotifier adds, updates, and prevents duplicate aliases',
+    () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      final notifier = container.read(catalogProvider.notifier);
+      final targetTpl = container.read(catalogProvider).templates.first;
+
+      // 1. Add new alias
+      final addErr = await notifier.addAlias(
+        aliasText: 'كوع صاروخ نص',
+        itemTemplateId: targetTpl.id,
+      );
+      expect(addErr, isNull);
+
+      var state = container.read(catalogProvider);
+      final added = state.aliases.firstWhere(
+        (a) => a.aliasText == 'كوع صاروخ نص',
+      );
+      expect(added.itemTemplateId, targetTpl.id);
+
+      // 2. Duplicate add rejected
+      final dupErr = await notifier.addAlias(
+        aliasText: '  كوع صاروخ نص  ',
+        itemTemplateId: targetTpl.id,
+      );
+      expect(dupErr, isNotNull);
+
+      // 3. Update existing alias
+      final secondTpl = state.templates.last;
+      final updErr = await notifier.updateAlias(
+        aliasId: added.id,
+        aliasText: 'كوع سريع نص',
+        itemTemplateId: secondTpl.id,
+      );
+      expect(updErr, isNull);
+
+      state = container.read(catalogProvider);
+      final updated = state.aliases.firstWhere((a) => a.id == added.id);
+      expect(updated.aliasText, 'كوع سريع نص');
+      expect(updated.itemTemplateId, secondTpl.id);
+    },
+  );
+
+  testWidgets(
+    'Settings technician dictionary supports expanding, adding, and updating aliases',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('الإعدادات'));
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('technician_dictionary_expansion')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.byKey(const Key('technician_dictionary_expansion')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('add_alias_button')));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('alias_text_field')),
+        'مسمى تجريبي جديد',
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('save_alias_button')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('مسمى تجريبي جديد'), findsOneWidget);
+
+      // Tap the newly added alias chip to edit it
+      await tester.tap(find.textContaining('مسمى تجريبي جديد'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('alias_text_field')),
+        'مسمى تجريبي محدث',
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('save_alias_button')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('مسمى تجريبي محدث'), findsOneWidget);
+      expect(find.textContaining('مسمى تجريبي جديد'), findsNothing);
+    },
+  );
+
+  test(
+    'InvoiceShareService.buildInvoicePdfFilename uses customer name and sanitizes invalid chars',
+    () {
+      final invNamed = InvoiceModel(
+        id: 'fn-1',
+        invoiceNumber: 'INV-00777',
+        customerName: '  أحمد / علي: محمود  ',
+        createdAt: DateTime(2026, 11, 25),
+      );
+      expect(
+        InvoiceShareService.buildInvoicePdfFilename(invNamed),
+        'أحمد علي محمود.pdf',
+      );
+
+      final invEmpty = invNamed.copyWith(customerName: '   ');
+      expect(
+        InvoiceShareService.buildInvoicePdfFilename(invEmpty),
+        'INV-00777.pdf',
+      );
+    },
+  );
+
+  testWidgets(
+    'ReviewScreen item card supports direct quantity input between + and - buttons',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('تسعير ورقة جديدة (AI)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('تجربة كشف تجريبي جاهز (AI Demo)'));
+      await tester.pumpAndSettle();
+
+      final qtyField = find.byKey(const Key('item_qty_field_scan-1'));
+      await tester.scrollUntilVisible(
+        qtyField,
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      expect(qtyField, findsOneWidget);
+      await tester.enterText(qtyField, '10');
+      await tester.pumpAndSettle();
+
+      // 10 * 18 ج.م = 180 ج.م
+      expect(find.text('180 ج.م'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'Excel import dialog supports direct selling price upload without markup fields',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('الأصناف'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.table_chart_outlined));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('إدراج نموذج جاهز'));
+      await tester.pumpAndSettle();
+
+      // Must require selecting Commercial vs Selling before import button enables
+      expect(
+        find.text('مطلوب تحديد هل الأسعار تجارية أم أسعار بيع قبل الاستيراد'),
+        findsOneWidget,
+      );
+
+      await tester.ensureVisible(
+        find.byKey(const Key('import_price_mode_selling')),
+      );
+      await tester.tap(find.byKey(const Key('import_price_mode_selling')));
+      await tester.pumpAndSettle();
+
+      // Profit and company discount inputs are hidden for direct selling price mode
+      expect(find.byKey(const Key('profit_markup_field')), findsNothing);
+      expect(find.byKey(const Key('company_discount_toggle')), findsNothing);
+
+      await tester.tap(find.text('استيراد للكتالوج'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('محابس وخلاطات'));
+      await tester.pumpAndSettle();
+
+      // Sample row محبس بلي نحاس has price 210 uploaded directly as selling price
+      expect(find.text('محبس بلي نحاس'), findsOneWidget);
+      expect(find.text('BR: 210 ج.م'), findsWidgets);
+      expect(find.textContaining('تجاري 210'), findsNothing);
     },
   );
 }

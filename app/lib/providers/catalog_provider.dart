@@ -354,6 +354,90 @@ class CatalogNotifier extends Notifier<CatalogState> {
     await _persistSnapshot();
   }
 
+  Future<String?> addAlias({
+    required String aliasText,
+    required String itemTemplateId,
+  }) async {
+    if (!state.isAdminMode) return 'هذه العملية متاحة للمدير فقط';
+    final clean = aliasText.trim();
+    if (clean.isEmpty) return 'مطلوب كتابة المسمى الدارج';
+
+    final normalized = clean.toLowerCase();
+    final duplicate = state.aliases.any(
+      (a) => a.aliasText.trim().toLowerCase() == normalized,
+    );
+    if (duplicate) return 'هذا المسمى مسجل بالفعل في القاموس';
+
+    try {
+      final ItemAliasModel created;
+      if (!AppConfig.isDemoMode) {
+        created = await SupabaseRepository().addAlias(
+          aliasText: clean,
+          itemTemplateId: itemTemplateId,
+        );
+      } else {
+        created = ItemAliasModel(
+          id: _uuid.v4(),
+          aliasText: clean,
+          itemTemplateId: itemTemplateId,
+        );
+      }
+
+      state = state.copyWith(aliases: [created, ...state.aliases]);
+      await _persistSnapshot();
+      return null;
+    } on AppException catch (e) {
+      return e.message;
+    } catch (_) {
+      return 'تعذر حفظ المسمى في القاموس';
+    }
+  }
+
+  Future<String?> updateAlias({
+    required String aliasId,
+    required String aliasText,
+    required String itemTemplateId,
+  }) async {
+    if (!state.isAdminMode) return 'هذه العملية متاحة للمدير فقط';
+    final clean = aliasText.trim();
+    if (clean.isEmpty) return 'مطلوب كتابة المسمى الدارج';
+
+    final normalized = clean.toLowerCase();
+    final duplicate = state.aliases.any(
+      (a) => a.id != aliasId && a.aliasText.trim().toLowerCase() == normalized,
+    );
+    if (duplicate) return 'هذا المسمى مسجل بالفعل في القاموس';
+
+    try {
+      if (!AppConfig.isDemoMode) {
+        await SupabaseRepository().updateAlias(
+          aliasId: aliasId,
+          aliasText: clean,
+          itemTemplateId: itemTemplateId,
+        );
+      }
+
+      final updatedList = [
+        for (final a in state.aliases)
+          if (a.id == aliasId)
+            ItemAliasModel(
+              id: aliasId,
+              aliasText: clean,
+              itemTemplateId: itemTemplateId,
+            )
+          else
+            a,
+      ];
+      state = state.copyWith(aliases: updatedList);
+      await _persistSnapshot();
+      return null;
+    } on AppException catch (e) {
+      return e.message;
+    } catch (_) {
+      return 'تعذر تحديث المسمى في القاموس';
+    }
+  }
+
   void deleteAlias(String aliasId) {
     if (!state.isAdminMode) return;
     state = state.copyWith(
@@ -510,20 +594,23 @@ class CatalogNotifier extends Notifier<CatalogState> {
   }
 
   /// Imports parsed Excel/CSV rows into the Product Tree (and Supabase if online).
-  /// When [companyDiscountPercent] > 0, each row's [CatalogCsvRow.price] is
-  /// treated as the company list price before discount, and the discounted
-  /// value is stored as the commercial price before applying [markupType]/[markupValue].
+  /// When [priceMode] is [ImportPriceMode.selling], [CatalogCsvRow.price] is saved
+  /// directly as the selling price without touching `commercialPrice`.
+  /// When [priceMode] is [ImportPriceMode.commercial] (default), any
+  /// [companyDiscountPercent] > 0 is deducted first to store the commercial price,
+  /// and [markupType]/[markupValue] calculates the selling price on top of it.
   Future<int> importCatalogRows(
     List<CatalogCsvRow> rows, {
-    required ProfitMarkupType markupType,
-    required double markupValue,
+    ImportPriceMode priceMode = ImportPriceMode.commercial,
+    ProfitMarkupType markupType = ProfitMarkupType.percent,
+    double markupValue = 0,
     double companyDiscountPercent = 0,
   }) async {
-    if (!state.isAdminMode ||
-        rows.isEmpty ||
-        markupValue < 0 ||
-        companyDiscountPercent < 0 ||
-        companyDiscountPercent >= 100) {
+    if (!state.isAdminMode || rows.isEmpty) return 0;
+    if (priceMode == ImportPriceMode.commercial &&
+        (markupValue < 0 ||
+            companyDiscountPercent < 0 ||
+            companyDiscountPercent >= 100)) {
       return 0;
     }
 
@@ -597,36 +684,55 @@ class CatalogNotifier extends Notifier<CatalogState> {
       }
 
       // 4. Upsert Variant commercial & selling prices
-      final commercialPrice = companyDiscountPercent > 0
-          ? calculateDiscountedCommercialPrice(
-              row.price,
-              companyDiscountPercent,
-            )
-          : row.price;
-      final sellingPrice =
-          calculateSellingPrice(commercialPrice, markupType, markupValue);
       final existingIdx = variants.indexWhere(
         (v) => v.itemTemplateId == template!.id && v.brandId == brand!.id,
       );
       late final ProductVariantModel variant;
-      if (existingIdx >= 0) {
-        variant = variants[existingIdx].copyWith(
-          price: sellingPrice,
-          commercialPrice: commercialPrice,
-          costPrice: commercialPrice,
-          isAvailable: true,
-        );
-        variants[existingIdx] = variant;
+      if (priceMode == ImportPriceMode.selling) {
+        final sellingPrice = row.price;
+        if (existingIdx >= 0) {
+          variant = variants[existingIdx].copyWith(
+            price: sellingPrice,
+            isAvailable: true,
+          );
+          variants[existingIdx] = variant;
+        } else {
+          variant = ProductVariantModel(
+            id: _uuid.v4(),
+            itemTemplateId: template.id,
+            brandId: brand.id,
+            price: sellingPrice,
+          );
+          variants.add(variant);
+        }
       } else {
-        variant = ProductVariantModel(
-          id: _uuid.v4(),
-          itemTemplateId: template.id,
-          brandId: brand.id,
-          price: sellingPrice,
-          commercialPrice: commercialPrice,
-          costPrice: commercialPrice,
-        );
-        variants.add(variant);
+        final commercialPrice = companyDiscountPercent > 0
+            ? calculateDiscountedCommercialPrice(
+                row.price,
+                companyDiscountPercent,
+              )
+            : row.price;
+        final sellingPrice =
+            calculateSellingPrice(commercialPrice, markupType, markupValue);
+        if (existingIdx >= 0) {
+          variant = variants[existingIdx].copyWith(
+            price: sellingPrice,
+            commercialPrice: commercialPrice,
+            costPrice: commercialPrice,
+            isAvailable: true,
+          );
+          variants[existingIdx] = variant;
+        } else {
+          variant = ProductVariantModel(
+            id: _uuid.v4(),
+            itemTemplateId: template.id,
+            brandId: brand.id,
+            price: sellingPrice,
+            commercialPrice: commercialPrice,
+            costPrice: commercialPrice,
+          );
+          variants.add(variant);
+        }
       }
 
       if (repo != null) {

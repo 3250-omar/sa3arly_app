@@ -26,9 +26,11 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   late final TextEditingController _phoneCtrl;
   late final TextEditingController _techCtrl;
   late final TextEditingController _discountCtrl;
+  late final TextEditingController _paidAmountCtrl;
   late final FocusNode _customerFocusNode;
   String? _loadedDraftId;
   String? _customerNameError;
+  String? _paymentError;
   bool _hasUnsavedChanges = false;
 
   @override
@@ -38,6 +40,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     _phoneCtrl = TextEditingController();
     _techCtrl = TextEditingController();
     _discountCtrl = TextEditingController(text: '0');
+    _paidAmountCtrl = TextEditingController();
     _customerFocusNode = FocusNode();
   }
 
@@ -47,8 +50,22 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     _phoneCtrl.dispose();
     _techCtrl.dispose();
     _discountCtrl.dispose();
+    _paidAmountCtrl.dispose();
     _customerFocusNode.dispose();
     super.dispose();
+  }
+
+  double _parseNumericText(String raw) {
+    const eastern = '٠١٢٣٤٥٦٧٨٩';
+    final normalized = raw
+        .trim()
+        .replaceAllMapped(
+          RegExp(r'[٠-٩]'),
+          (m) => eastern.indexOf(m.group(0)!).toString(),
+        )
+        .replaceAll('،', '.')
+        .replaceAll(',', '.');
+    return double.tryParse(normalized) ?? 0;
   }
 
   void _syncControllersIfNeeded(InvoiceModel draft) {
@@ -60,6 +77,12 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     _discountCtrl.text = draft.discountValue > 0
         ? draft.discountValue.toStringAsFixed(0)
         : '0';
+    _paidAmountCtrl.text = draft.paidAmount > 0
+        ? (draft.paidAmount == draft.paidAmount.roundToDouble()
+            ? draft.paidAmount.toInt().toString()
+            : draft.paidAmount.toString())
+        : '';
+    _paymentError = null;
 
     final existsInSaved =
         ref.read(invoicesProvider).any((inv) => inv.id == draft.id);
@@ -77,7 +100,8 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   InvoiceModel _withFormFields(InvoiceModel draft) {
     final techText = _techCtrl.text.trim();
     final phoneText = _phoneCtrl.text.trim();
-    final discountVal = double.tryParse(_discountCtrl.text.trim()) ?? 0;
+    final discountVal = _parseNumericText(_discountCtrl.text);
+    final paidVal = _parseNumericText(_paidAmountCtrl.text);
 
     return InvoiceModel(
       id: draft.id,
@@ -91,8 +115,15 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       technicianName: techText.isEmpty ? null : techText,
       discountType: draft.discountType,
       discountValue: discountVal < 0 ? 0 : discountVal,
+      paymentMethod: draft.paymentMethod,
+      paidAmount: draft.paymentMethod.requiresPaidNow
+          ? (paidVal < 0 ? 0 : paidVal)
+          : 0,
+      paymentDueDate:
+          draft.paymentMethod.requiresDueDate ? draft.paymentDueDate : null,
       notes: draft.notes,
       imagePaths: draft.imagePaths,
+      localScanImages: draft.localScanImages,
       createdByName: draft.createdByName,
       createdAt: draft.createdAt,
       items: draft.items,
@@ -117,6 +148,9 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       technicianName: draft.technicianName,
       discountType: draft.discountType,
       discountValue: draft.discountValue,
+      paymentMethod: draft.paymentMethod,
+      paidAmount: draft.paidAmount,
+      paymentDueDate: draft.paymentDueDate,
       notes: draft.notes,
       imagePaths: draft.imagePaths,
       localScanImages: draft.localScanImages,
@@ -802,6 +836,25 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
   }
 
+  Future<void> _pickPaymentDueDate(InvoiceModel draft) async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final initial = draft.paymentDueDate != null &&
+            !draft.paymentDueDate!.isBefore(today)
+        ? draft.paymentDueDate!
+        : today;
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: today,
+      lastDate: DateTime(now.year + 3),
+    );
+    if (picked == null || !mounted) return;
+    setState(() => _paymentError = null);
+    _updateDraft(_withFormFields(draft).copyWith(paymentDueDate: picked));
+  }
+
   bool _saveDraft(InvoiceModel rawDraft, InvoiceStatus targetStatus) {
     if (_customerCtrl.text.trim().isEmpty) {
       setState(() => _customerNameError = 'مطلوب إدخال اسم العميل أولاً');
@@ -819,6 +872,34 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     }
 
     final finalized = _withFormFields(rawDraft).copyWith(status: targetStatus);
+
+    if (targetStatus == InvoiceStatus.approved) {
+      if (finalized.paymentMethod.requiresPaidNow &&
+          (finalized.paidAmount <= 0 ||
+              finalized.paidAmount >= finalized.total)) {
+        final msg = finalized.paidAmount <= 0
+            ? 'مطلوب إدخال المبلغ المدفوع الآن (أكبر من صفر)'
+            : 'المبلغ المدفوع يجب أن يكون أقل من إجمالي الفاتورة';
+        setState(() => _paymentError = msg);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg)),
+        );
+        return false;
+      }
+      if (finalized.paymentMethod.requiresDueDate &&
+          finalized.paymentDueDate == null) {
+        setState(() => _paymentError = 'مطلوب تحديد موعد السداد');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('مطلوب تحديد موعد السداد قبل الاعتماد')),
+        );
+        return false;
+      }
+    }
+
+    if (_paymentError != null) {
+      setState(() => _paymentError = null);
+    }
+
     _hasUnsavedChanges = false;
     _updateDraft(finalized, markDirty: false);
     ref.read(invoicesProvider.notifier).saveInvoice(finalized);
@@ -1177,6 +1258,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
               else
                 for (var i = 0; i < draft.items.length; i++)
                   _ReviewItemCard(
+                    key: ValueKey(draft.items[i].id),
                     item: draft.items[i],
                     onIncrement: () => _updateItem(
                       draft,
@@ -1196,6 +1278,11 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                         );
                       }
                     },
+                    onQuantityChanged: (qty) => _updateItem(
+                      draft,
+                      i,
+                      draft.items[i].copyWith(quantity: qty),
+                    ),
                     onEdit: () => _showEditItemDialog(draft, i, draft.items[i]),
                     onLinkToCatalog: () =>
                         _showCatalogPicker(draft: draft, replaceIndex: i),
@@ -1279,6 +1366,132 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                         isBold: true,
                         valueColor: AppTheme.primaryColor,
                       ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // Payment Collection Method Card
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'طريقة التحصيل',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<PaymentMethod>(
+                        key: const Key('payment_method_dropdown'),
+                        initialValue: draft.paymentMethod,
+                        decoration: const InputDecoration(
+                          labelText: 'اختر طريقة التحصيل',
+                          prefixIcon: Icon(Icons.payments_outlined),
+                        ),
+                        items: [
+                          for (final method in PaymentMethod.values)
+                            DropdownMenuItem(
+                              value: method,
+                              child: Text(method.arabicLabel),
+                            ),
+                        ],
+                        onChanged: (val) {
+                          if (val == null) return;
+                          setState(() => _paymentError = null);
+                          if (!val.requiresPaidNow) {
+                            _paidAmountCtrl.clear();
+                          }
+                          _updateDraft(
+                            _withFormFields(draft).copyWith(
+                              paymentMethod: val,
+                              paidAmount: val.requiresPaidNow
+                                  ? _parseNumericText(_paidAmountCtrl.text)
+                                  : 0,
+                              clearPaymentDueDate: !val.requiresDueDate,
+                            ),
+                          );
+                        },
+                      ),
+                      if (draft.paymentMethod == PaymentMethod.cash) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          'تحصيل كامل المبلغ كاش (${InvoiceShareService.formatCurrency(draft.total)})',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                      ],
+                      if (draft.paymentMethod.requiresPaidNow) ...[
+                        const SizedBox(height: 10),
+                        TextField(
+                          key: const Key('paid_amount_field'),
+                          controller: _paidAmountCtrl,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          onChanged: (_) {
+                            if (_paymentError != null) {
+                              setState(() => _paymentError = null);
+                            }
+                            _updateDraft(_withFormFields(draft));
+                          },
+                          decoration: InputDecoration(
+                            labelText: draft.paymentMethod.paidAmountLabel,
+                            hintText: 'مثال: 500',
+                            prefixIcon: const Icon(Icons.attach_money),
+                          ),
+                        ),
+                      ],
+                      if (draft.paymentMethod.requiresDueDate) ...[
+                        const SizedBox(height: 10),
+                        OutlinedButton.icon(
+                          key: const Key('payment_due_date_picker'),
+                          onPressed: () => _pickPaymentDueDate(draft),
+                          icon: const Icon(Icons.calendar_today_outlined),
+                          label: Text(
+                            draft.paymentDueDate != null
+                                ? '${draft.paymentMethod.dueDateLabel}: ${InvoiceModel.formatDateOnly(draft.paymentDueDate)}'
+                                : draft.paymentMethod.dueDateLabel,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF0F9FF),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            draft.paymentMethod ==
+                                    PaymentMethod.deferredNoDeposit
+                                ? 'المتبقي بالكامل: ${InvoiceShareService.formatCurrency(draft.remainingAmount)}'
+                                : 'المدفوع: ${InvoiceShareService.formatCurrency(draft.effectivePaidAmount)}  |  المتبقي: ${InvoiceShareService.formatCurrency(draft.remainingAmount)}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: AppTheme.primaryColor,
+                            ),
+                          ),
+                        ),
+                      ],
+                      if (_paymentError != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _paymentError!,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: AppTheme.lowConfidenceColor,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -1421,11 +1634,13 @@ class _LegendPill extends StatelessWidget {
   }
 }
 
-class _ReviewItemCard extends StatelessWidget {
+class _ReviewItemCard extends StatefulWidget {
   const _ReviewItemCard({
+    super.key,
     required this.item,
     required this.onIncrement,
     required this.onDecrement,
+    required this.onQuantityChanged,
     required this.onEdit,
     required this.onLinkToCatalog,
     required this.onPickBrand,
@@ -1435,13 +1650,76 @@ class _ReviewItemCard extends StatelessWidget {
   final InvoiceItemModel item;
   final VoidCallback onIncrement;
   final VoidCallback onDecrement;
+  final ValueChanged<double> onQuantityChanged;
   final VoidCallback onEdit;
   final VoidCallback onLinkToCatalog;
   final VoidCallback? onPickBrand;
   final VoidCallback onDelete;
 
   @override
+  State<_ReviewItemCard> createState() => _ReviewItemCardState();
+}
+
+class _ReviewItemCardState extends State<_ReviewItemCard> {
+  late final TextEditingController _qtyCtrl;
+  late final FocusNode _qtyFocusNode;
+
+  static String _formatQty(double q) {
+    return q == q.roundToDouble() ? q.toInt().toString() : q.toString();
+  }
+
+  static double? _parseQty(String raw) {
+    const eastern = '٠١٢٣٤٥٦٧٨٩';
+    final normalized = raw
+        .trim()
+        .replaceAllMapped(
+          RegExp(r'[٠-٩]'),
+          (m) => eastern.indexOf(m.group(0)!).toString(),
+        )
+        .replaceAll('،', '.')
+        .replaceAll(',', '.');
+    if (normalized.isEmpty) return null;
+    return double.tryParse(normalized);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _qtyCtrl = TextEditingController(text: _formatQty(widget.item.quantity));
+    _qtyFocusNode = FocusNode()..addListener(_handleFocusChange);
+  }
+
+  void _handleFocusChange() {
+    if (!_qtyFocusNode.hasFocus) {
+      final parsed = _parseQty(_qtyCtrl.text);
+      if (parsed == null || parsed <= 0) {
+        _qtyCtrl.text = _formatQty(widget.item.quantity);
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReviewItemCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.item.quantity != widget.item.quantity) {
+      final currentParsed = _parseQty(_qtyCtrl.text);
+      if (currentParsed != widget.item.quantity) {
+        _qtyCtrl.text = _formatQty(widget.item.quantity);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _qtyFocusNode.removeListener(_handleFocusChange);
+    _qtyFocusNode.dispose();
+    _qtyCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final item = widget.item;
     final (accent, bg) = switch (item.confidence) {
       OcrConfidence.high => (
           AppTheme.highConfidenceColor,
@@ -1496,7 +1774,7 @@ class _ReviewItemCard extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (onPickBrand != null)
+                if (widget.onPickBrand != null)
                   ActionChip(
                     avatar: const Icon(Icons.swap_vert, size: 15),
                     label: Text(
@@ -1507,12 +1785,12 @@ class _ReviewItemCard extends StatelessWidget {
                       ),
                     ),
                     visualDensity: VisualDensity.compact,
-                    onPressed: onPickBrand,
+                    onPressed: widget.onPickBrand,
                   ),
                 IconButton(
                   tooltip: 'تعديل السعر/الاسم',
                   icon: const Icon(Icons.edit_outlined, size: 20),
-                  onPressed: onEdit,
+                  onPressed: widget.onEdit,
                 ),
                 IconButton(
                   tooltip: 'حذف البند',
@@ -1521,7 +1799,7 @@ class _ReviewItemCard extends StatelessWidget {
                     size: 20,
                     color: AppTheme.lowConfidenceColor,
                   ),
-                  onPressed: onDelete,
+                  onPressed: widget.onDelete,
                 ),
               ],
             ),
@@ -1546,23 +1824,49 @@ class _ReviewItemCard extends StatelessWidget {
             Row(
               children: [
                 IconButton.outlined(
-                  onPressed: onDecrement,
+                  onPressed: widget.onDecrement,
                   icon: const Icon(Icons.remove, size: 18),
                   visualDensity: VisualDensity.compact,
                 ),
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  child: Text(
-                    '${item.quantity} ${item.unit}',
-                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  child: SizedBox(
+                    width: 64,
+                    child: TextField(
+                      key: Key('item_qty_field_${item.id}'),
+                      controller: _qtyCtrl,
+                      focusNode: _qtyFocusNode,
+                      textAlign: TextAlign.center,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 8,
+                        ),
+                      ),
+                      onChanged: (val) {
+                        final parsed = _parseQty(val);
+                        if (parsed != null && parsed > 0) {
+                          widget.onQuantityChanged(parsed);
+                        }
+                      },
+                    ),
                   ),
                 ),
                 IconButton.outlined(
-                  onPressed: onIncrement,
+                  onPressed: widget.onIncrement,
                   icon: const Icon(Icons.add, size: 18),
                   visualDensity: VisualDensity.compact,
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 6),
+                Text(
+                  item.unit,
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                ),
+                const SizedBox(width: 8),
                 Text(
                   '× ${InvoiceShareService.formatCurrency(item.unitPrice)}',
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
@@ -1583,7 +1887,7 @@ class _ReviewItemCard extends StatelessWidget {
               Align(
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
-                  onPressed: onLinkToCatalog,
+                  onPressed: widget.onLinkToCatalog,
                   icon: const Icon(Icons.link_rounded, size: 18),
                   label: const Text('ربط بصنف من الكتالوج وحفظه بالقاموس'),
                 ),

@@ -55,7 +55,21 @@ class InvoiceShareService {
     }
     buf
       ..writeln('*الصافي المطلوب: ${formatCurrency(invoice.total)}*')
-      ..writeln('للاستفسار: ${shop.phone}');
+      ..writeln('طريقة التحصيل: ${invoice.paymentMethod.arabicLabel}');
+    if (invoice.paymentMethod != PaymentMethod.cash) {
+      if (invoice.effectivePaidAmount > 0) {
+        buf.writeln(
+          'المدفوع / المقدم: ${formatCurrency(invoice.effectivePaidAmount)}',
+        );
+      }
+      buf.writeln('المتبقي: ${formatCurrency(invoice.remainingAmount)}');
+      if (invoice.paymentDueDate != null) {
+        buf.writeln(
+          'موعد السداد: ${InvoiceModel.formatDateOnly(invoice.paymentDueDate)}',
+        );
+      }
+    }
+    buf.writeln('للاستفسار: ${shop.phone}');
 
     return buf.toString();
   }
@@ -110,6 +124,29 @@ class InvoiceShareService {
     return shareInvoicePdf(invoice: invoice, shop: shop);
   }
 
+  static String _sanitizePdfBaseName(String raw) {
+    return raw
+        .replaceAll(RegExp(r'[\\/:*?"<>|]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static String buildInvoicePdfFilename(InvoiceModel invoice) {
+    final safeCustomer = _sanitizePdfBaseName(invoice.customerName);
+    final base =
+        safeCustomer.isNotEmpty ? safeCustomer : invoice.invoiceNumber;
+    return '$base.pdf';
+  }
+
+  static String buildComparisonPdfFilename(List<InvoiceModel> groupInvoices) {
+    if (groupInvoices.isEmpty) return 'comparison.pdf';
+    final safeCustomer = _sanitizePdfBaseName(groupInvoices.first.customerName);
+    if (safeCustomer.isNotEmpty) {
+      return 'مقارنة - $safeCustomer.pdf';
+    }
+    return 'comparison-${groupInvoices.first.invoiceNumber}.pdf';
+  }
+
   static Future<bool> shareInvoicePdf({
     required InvoiceModel invoice,
     required ShopSettingsModel shop,
@@ -117,7 +154,7 @@ class InvoiceShareService {
     final bytes = await buildInvoicePdfBytes(invoice: invoice, shop: shop);
     return Printing.sharePdf(
       bytes: bytes,
-      filename: '${invoice.invoiceNumber}.pdf',
+      filename: buildInvoicePdfFilename(invoice),
     );
   }
 
@@ -289,6 +326,55 @@ class InvoiceShareService {
                       ),
                     ],
                   ),
+                  pw.Divider(),
+                  pw.Row(
+                    mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                    children: [
+                      pw.Text('طريقة التحصيل:'),
+                      pw.Text(
+                        invoice.paymentMethod.arabicLabel,
+                        style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                  if (invoice.paymentMethod != PaymentMethod.cash) ...[
+                    if (invoice.effectivePaidAmount > 0) ...[
+                      pw.SizedBox(height: 4),
+                      pw.Row(
+                        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                        children: [
+                          pw.Text('المدفوع / المقدم:'),
+                          pw.Text(formatCurrency(invoice.effectivePaidAmount)),
+                        ],
+                      ),
+                    ],
+                    pw.SizedBox(height: 4),
+                    pw.Row(
+                      mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                      children: [
+                        pw.Text('المتبقي:'),
+                        pw.Text(
+                          formatCurrency(invoice.remainingAmount),
+                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                    if (invoice.paymentDueDate != null) ...[
+                      pw.SizedBox(height: 4),
+                      pw.Row(
+                        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                        children: [
+                          pw.Text('موعد السداد:'),
+                          pw.Text(
+                            InvoiceModel.formatDateOnly(
+                                  invoice.paymentDueDate,
+                                ) ??
+                                '',
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
                 ],
               ),
             ),
@@ -306,7 +392,7 @@ class InvoiceShareService {
   }) async {
     final bytes = await buildInvoicePdfBytes(invoice: invoice, shop: shop);
     await Printing.layoutPdf(
-      name: '${invoice.invoiceNumber}.pdf',
+      name: buildInvoicePdfFilename(invoice),
       onLayout: (format) async => bytes,
     );
   }
@@ -377,7 +463,7 @@ class InvoiceShareService {
     );
     return Printing.sharePdf(
       bytes: bytes,
-      filename: 'comparison-${sorted.first.invoiceNumber}.pdf',
+      filename: buildComparisonPdfFilename(sorted),
     );
   }
 
@@ -558,7 +644,7 @@ class InvoiceShareService {
       shop: shop,
     );
     await Printing.layoutPdf(
-      name: 'comparison-${sorted.first.invoiceNumber}.pdf',
+      name: buildComparisonPdfFilename(sorted),
       onLayout: (format) async => bytes,
     );
   }

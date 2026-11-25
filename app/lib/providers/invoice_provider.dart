@@ -9,6 +9,7 @@ import 'package:sanitary_pricing_app/models/catalog_models.dart';
 import 'package:sanitary_pricing_app/models/invoice_models.dart';
 import 'package:sanitary_pricing_app/providers/auth_provider.dart';
 import 'package:sanitary_pricing_app/providers/catalog_provider.dart';
+import 'package:sanitary_pricing_app/services/payment_reminder_service.dart';
 import 'package:uuid/uuid.dart';
 
 class InvoicesSyncState {
@@ -116,6 +117,7 @@ class InvoicesNotifier extends Notifier<List<InvoiceModel>> {
       final remote = await repo.fetchInvoices();
       state = remote;
       await LocalCacheService.saveInvoices(remote);
+      unawaited(PaymentReminderService.syncAll(remote));
       syncCtrl.setOffline(false);
     } catch (_) {
       syncCtrl.setOffline(true);
@@ -140,6 +142,7 @@ class InvoicesNotifier extends Notifier<List<InvoiceModel>> {
     }
 
     unawaited(LocalCacheService.saveInvoices(state));
+    unawaited(PaymentReminderService.scheduleForInvoice(invoice));
 
     if (!AppConfig.isDemoMode) {
       unawaited(_pushInvoiceRemote(invoice));
@@ -167,6 +170,7 @@ class InvoicesNotifier extends Notifier<List<InvoiceModel>> {
   void deleteInvoice(String id) {
     state = state.where((inv) => inv.id != id).toList();
     unawaited(LocalCacheService.saveInvoices(state));
+    unawaited(PaymentReminderService.cancelForInvoice(id));
     unawaited(ref.read(invoicesSyncProvider.notifier).clearPending(id));
 
     if (!AppConfig.isDemoMode) {

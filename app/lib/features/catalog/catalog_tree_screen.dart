@@ -736,6 +736,7 @@ class _ExcelImportExportDialogState
   final _pasteCtrl = TextEditingController();
   final _discountCtrl = TextEditingController();
   final _markupCtrl = TextEditingController();
+  ImportPriceMode? _priceMode;
   var _applyCompanyDiscount = false;
   ProfitMarkupType _markupType = ProfitMarkupType.percent;
   var _parsed = const CatalogCsvParseResult(rows: [], skippedLines: 0);
@@ -971,88 +972,14 @@ class _ExcelImportExportDialogState
                 ),
                 if (_parsed.rows.isNotEmpty) ...[
                   const SizedBox(height: 12),
-                  Material(
-                    color: Colors.amber.withValues(alpha: 0.08),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      side: BorderSide(
-                        color: !_isDiscountValid
-                            ? AppTheme.lowConfidenceColor.withValues(alpha: 0.6)
-                            : Colors.amber.shade700.withValues(alpha: 0.35),
-                      ),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 8,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          CheckboxListTile(
-                            key: const Key('company_discount_toggle'),
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            controlAffinity: ListTileControlAffinity.leading,
-                            value: _applyCompanyDiscount,
-                            onChanged: _isImporting
-                                ? null
-                                : (v) => setState(
-                                      () => _applyCompanyDiscount = v ?? false,
-                                    ),
-                            title: const Text(
-                              'القائمة بأسعار الشركة (تطبيق خصم الشركة)',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                            subtitle: const Text(
-                              'يتم خصم نسبة الشركة أولاً لحساب السعر التجاري، ثم إضافة الربح عليه',
-                              style: TextStyle(fontSize: 11),
-                            ),
-                          ),
-                          if (_applyCompanyDiscount) ...[
-                            const SizedBox(height: 6),
-                            TextField(
-                              key: const Key('company_discount_field'),
-                              controller: _discountCtrl,
-                              enabled: !_isImporting,
-                              keyboardType:
-                                  const TextInputType.numberWithOptions(
-                                decimal: true,
-                              ),
-                              onChanged: (_) => setState(() {}),
-                              decoration: const InputDecoration(
-                                labelText: 'نسبة خصم الشركة (%) *',
-                                hintText: 'مثال: 15',
-                              ),
-                            ),
-                            if (_validDiscountPercent == null) ...[
-                              const SizedBox(height: 6),
-                              const Text(
-                                'أدخل نسبة خصم صحيحة (من 0 إلى أقل من 100%)',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppTheme.lowConfidenceColor,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: AppTheme.primaryColor.withValues(alpha: 0.05),
+                      color: AppTheme.primaryColor.withValues(alpha: 0.04),
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
-                        color: _validMarkupValue == null
-                            ? AppTheme.lowConfidenceColor.withValues(alpha: 0.5)
+                        color: _priceMode == null
+                            ? AppTheme.lowConfidenceColor.withValues(alpha: 0.6)
                             : AppTheme.primaryColor.withValues(alpha: 0.25),
                       ),
                     ),
@@ -1060,7 +987,7 @@ class _ExcelImportExportDialogState
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         const Text(
-                          'إعداد نسبة / قيمة المكسب على الأسعار التجارية (إجباري):',
+                          'نوع الأسعار في الملف (إجباري):',
                           style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w800,
@@ -1070,39 +997,36 @@ class _ExcelImportExportDialogState
                         const SizedBox(height: 8),
                         Wrap(
                           spacing: 8,
+                          runSpacing: 8,
                           children: [
-                            for (final type in ProfitMarkupType.values)
-                              ChoiceChip(
-                                label: Text(type.arabicLabel),
-                                selected: _markupType == type,
-                                onSelected: _isImporting
-                                    ? null
-                                    : (_) => setState(() => _markupType = type),
-                              ),
+                            ChoiceChip(
+                              key: const Key('import_price_mode_commercial'),
+                              label: Text(ImportPriceMode.commercial.arabicLabel),
+                              selected: _priceMode == ImportPriceMode.commercial,
+                              onSelected: _isImporting
+                                  ? null
+                                  : (_) => setState(
+                                        () => _priceMode =
+                                            ImportPriceMode.commercial,
+                                      ),
+                            ),
+                            ChoiceChip(
+                              key: const Key('import_price_mode_selling'),
+                              label: Text(ImportPriceMode.selling.arabicLabel),
+                              selected: _priceMode == ImportPriceMode.selling,
+                              onSelected: _isImporting
+                                  ? null
+                                  : (_) => setState(
+                                        () =>
+                                            _priceMode = ImportPriceMode.selling,
+                                      ),
+                            ),
                           ],
                         ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          key: const Key('profit_markup_field'),
-                          controller: _markupCtrl,
-                          enabled: !_isImporting,
-                          keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
-                          onChanged: (_) => setState(() {}),
-                          decoration: InputDecoration(
-                            labelText: _markupType == ProfitMarkupType.percent
-                                ? 'نسبة المكسب (%) *'
-                                : 'قيمة المكسب الثابتة (ج.م) *',
-                            hintText: _markupType == ProfitMarkupType.percent
-                                ? 'مثال: 20'
-                                : 'مثال: 10',
-                          ),
-                        ),
-                        if (_validMarkupValue == null) ...[
+                        if (_priceMode == null) ...[
                           const SizedBox(height: 6),
                           const Text(
-                            'مطلوب إدخال قيمة المكسب لحساب سعر البيع قبل الاستيراد',
+                            'مطلوب تحديد هل الأسعار تجارية أم أسعار بيع قبل الاستيراد',
                             style: TextStyle(
                               fontSize: 11,
                               fontWeight: FontWeight.w700,
@@ -1113,33 +1037,191 @@ class _ExcelImportExportDialogState
                       ],
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  for (final r in _parsed.rows.take(3)) ...[
-                    Builder(
-                      builder: (_) {
-                        final effectiveCommercial = _effectiveDiscountPercent > 0
-                            ? calculateDiscountedCommercialPrice(
-                                r.price,
-                                _effectiveDiscountPercent,
-                              )
-                            : r.price;
-                        final prefix =
-                            '• ${r.itemName}${r.size != null ? " (${r.size})" : ""} — ${r.brandName}: ';
-                        final pricePart = _effectiveDiscountPercent > 0
-                            ? 'قائمة ${InvoiceShareService.formatCurrency(r.price)} ← تجاري ${InvoiceShareService.formatCurrency(effectiveCommercial)}'
-                            : 'تجاري ${InvoiceShareService.formatCurrency(effectiveCommercial)}';
-                        final sellingPart = _validMarkupValue != null
-                            ? ' | بيع ${InvoiceShareService.formatCurrency(calculateSellingPrice(effectiveCommercial, _markupType, _validMarkupValue!))}'
-                            : '';
-                        return Text(
-                          '$prefix$pricePart$sellingPart',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.grey.shade700,
-                          ),
-                        );
-                      },
+                  if (_priceMode == ImportPriceMode.commercial) ...[
+                    const SizedBox(height: 10),
+                    Material(
+                      color: Colors.amber.withValues(alpha: 0.08),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(
+                          color: !_isDiscountValid
+                              ? AppTheme.lowConfidenceColor.withValues(alpha: 0.6)
+                              : Colors.amber.shade700.withValues(alpha: 0.35),
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            CheckboxListTile(
+                              key: const Key('company_discount_toggle'),
+                              contentPadding: EdgeInsets.zero,
+                              dense: true,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              value: _applyCompanyDiscount,
+                              onChanged: _isImporting
+                                  ? null
+                                  : (v) => setState(
+                                        () =>
+                                            _applyCompanyDiscount = v ?? false,
+                                      ),
+                              title: const Text(
+                                'القائمة بأسعار الشركة (تطبيق خصم الشركة)',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              subtitle: const Text(
+                                'يتم خصم نسبة الشركة أولاً لحساب السعر التجاري، ثم إضافة الربح عليه',
+                                style: TextStyle(fontSize: 11),
+                              ),
+                            ),
+                            if (_applyCompanyDiscount) ...[
+                              const SizedBox(height: 6),
+                              TextField(
+                                key: const Key('company_discount_field'),
+                                controller: _discountCtrl,
+                                enabled: !_isImporting,
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                  decimal: true,
+                                ),
+                                onChanged: (_) => setState(() {}),
+                                decoration: const InputDecoration(
+                                  labelText: 'نسبة خصم الشركة (%) *',
+                                  hintText: 'مثال: 15',
+                                ),
+                              ),
+                              if (_validDiscountPercent == null) ...[
+                                const SizedBox(height: 6),
+                                const Text(
+                                  'أدخل نسبة خصم صحيحة (من 0 إلى أقل من 100%)',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppTheme.lowConfidenceColor,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ],
+                        ),
+                      ),
                     ),
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: AppTheme.primaryColor.withValues(alpha: 0.05),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: _validMarkupValue == null
+                              ? AppTheme.lowConfidenceColor.withValues(alpha: 0.5)
+                              : AppTheme.primaryColor.withValues(alpha: 0.25),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text(
+                            'إعداد نسبة / قيمة المكسب على الأسعار التجارية (إجباري):',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              color: AppTheme.primaryColor,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              for (final type in ProfitMarkupType.values)
+                                ChoiceChip(
+                                  label: Text(type.arabicLabel),
+                                  selected: _markupType == type,
+                                  onSelected: _isImporting
+                                      ? null
+                                      : (_) =>
+                                          setState(() => _markupType = type),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            key: const Key('profit_markup_field'),
+                            controller: _markupCtrl,
+                            enabled: !_isImporting,
+                            keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true,
+                            ),
+                            onChanged: (_) => setState(() {}),
+                            decoration: InputDecoration(
+                              labelText: _markupType == ProfitMarkupType.percent
+                                  ? 'نسبة المكسب (%) *'
+                                  : 'قيمة المكسب الثابتة (ج.م) *',
+                              hintText: _markupType == ProfitMarkupType.percent
+                                  ? 'مثال: 20'
+                                  : 'مثال: 10',
+                            ),
+                          ),
+                          if (_validMarkupValue == null) ...[
+                            const SizedBox(height: 6),
+                            const Text(
+                              'مطلوب إدخال قيمة المكسب لحساب سعر البيع قبل الاستيراد',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: AppTheme.lowConfidenceColor,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    for (final r in _parsed.rows.take(3)) ...[
+                      Builder(
+                        builder: (_) {
+                          final effectiveCommercial = _effectiveDiscountPercent >
+                                  0
+                              ? calculateDiscountedCommercialPrice(
+                                  r.price,
+                                  _effectiveDiscountPercent,
+                                )
+                              : r.price;
+                          final prefix =
+                              '• ${r.itemName}${r.size != null ? " (${r.size})" : ""} — ${r.brandName}: ';
+                          final pricePart = _effectiveDiscountPercent > 0
+                              ? 'قائمة ${InvoiceShareService.formatCurrency(r.price)} ← تجاري ${InvoiceShareService.formatCurrency(effectiveCommercial)}'
+                              : 'تجاري ${InvoiceShareService.formatCurrency(effectiveCommercial)}';
+                          final sellingPart = _validMarkupValue != null
+                              ? ' | بيع ${InvoiceShareService.formatCurrency(calculateSellingPrice(effectiveCommercial, _markupType, _validMarkupValue!))}'
+                              : '';
+                          return Text(
+                            '$prefix$pricePart$sellingPart',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey.shade700,
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ] else if (_priceMode == ImportPriceMode.selling) ...[
+                    const SizedBox(height: 8),
+                    for (final r in _parsed.rows.take(3))
+                      Text(
+                        '• ${r.itemName}${r.size != null ? " (${r.size})" : ""} — ${r.brandName}: سعر البيع ${InvoiceShareService.formatCurrency(r.price)}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade700,
+                        ),
+                      ),
                   ],
                 ],
               ],
@@ -1155,21 +1237,31 @@ class _ExcelImportExportDialogState
         ElevatedButton.icon(
           onPressed: _isImporting ||
                   _parsed.rows.isEmpty ||
-                  _validMarkupValue == null ||
-                  !_isDiscountValid
+                  _priceMode == null ||
+                  (_priceMode == ImportPriceMode.commercial &&
+                      (_validMarkupValue == null || !_isDiscountValid))
               ? null
               : () async {
-                  final markupValue = _validMarkupValue;
-                  if (markupValue == null || !_isDiscountValid) return;
+                  final mode = _priceMode;
+                  if (mode == null) return;
+                  final markupValue = _validMarkupValue ?? 0;
+                  if (mode == ImportPriceMode.commercial &&
+                      (_validMarkupValue == null || !_isDiscountValid)) {
+                    return;
+                  }
                   setState(() => _isImporting = true);
                   try {
                     final count = await ref
                         .read(catalogProvider.notifier)
                         .importCatalogRows(
                           _parsed.rows,
+                          priceMode: mode,
                           markupType: _markupType,
                           markupValue: markupValue,
-                          companyDiscountPercent: _effectiveDiscountPercent,
+                          companyDiscountPercent:
+                              mode == ImportPriceMode.commercial
+                                  ? _effectiveDiscountPercent
+                                  : 0,
                         );
                     if (!context.mounted) return;
                     Navigator.pop(context);

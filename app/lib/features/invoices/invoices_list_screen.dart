@@ -318,6 +318,65 @@ class _InvoicesListScreenState extends ConsumerState<InvoicesListScreen> {
                                 ),
                               ],
                             ),
+                            if (inv.paymentMethod != PaymentMethod.cash) ...[
+                              const SizedBox(height: 6),
+                              Wrap(
+                                spacing: 10,
+                                runSpacing: 4,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 3,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: inv.isPaymentDueOrOverdue
+                                          ? AppTheme.lowConfidenceBg
+                                          : const Color(0xFFE0F2FE),
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                    child: Text(
+                                      inv.paymentMethod.arabicLabel,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                        color: inv.isPaymentDueOrOverdue
+                                            ? AppTheme.lowConfidenceColor
+                                            : AppTheme.primaryColor,
+                                      ),
+                                    ),
+                                  ),
+                                  if (inv.effectivePaidAmount > 0)
+                                    Text(
+                                      'مدفوع: ${InvoiceShareService.formatCurrency(inv.effectivePaidAmount)}',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey.shade700,
+                                      ),
+                                    ),
+                                  Text(
+                                    'متبقي: ${InvoiceShareService.formatCurrency(inv.remainingAmount)}',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                      color: AppTheme.lowConfidenceColor,
+                                    ),
+                                  ),
+                                  if (inv.paymentDueDate != null)
+                                    Text(
+                                      'موعد السداد: ${InvoiceModel.formatDateOnly(inv.paymentDueDate)}',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: inv.isPaymentDueOrOverdue
+                                            ? AppTheme.lowConfidenceColor
+                                            : Colors.grey.shade700,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
                             const Divider(height: 18),
                             Row(
                               children: [

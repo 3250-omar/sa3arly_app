@@ -11,10 +11,12 @@ import 'package:sanitary_pricing_app/features/reports/reports_screen.dart';
 import 'package:sanitary_pricing_app/features/review/review_screen.dart';
 import 'package:sanitary_pricing_app/features/shell/main_shell.dart';
 import 'package:sanitary_pricing_app/providers/auth_provider.dart';
+import 'package:sanitary_pricing_app/services/payment_reminder_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthState;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await PaymentReminderService.initialize();
 
   if (!AppConfig.isDemoMode) {
     await Supabase.initialize(
