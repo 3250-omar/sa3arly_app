@@ -4,10 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sanitary_pricing_app/core/theme/app_theme.dart';
+import 'package:sanitary_pricing_app/features/shell/main_shell.dart';
 import 'package:sanitary_pricing_app/models/catalog_models.dart';
 import 'package:sanitary_pricing_app/models/invoice_models.dart';
 import 'package:sanitary_pricing_app/providers/catalog_provider.dart';
 import 'package:sanitary_pricing_app/providers/invoice_provider.dart';
+import 'package:sanitary_pricing_app/providers/notifications_provider.dart';
 import 'package:sanitary_pricing_app/services/invoice_share_service.dart';
 import 'package:sanitary_pricing_app/services/scan_service.dart';
 import 'package:uuid/uuid.dart';
@@ -32,6 +34,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   String? _customerNameError;
   String? _paymentError;
   bool _hasUnsavedChanges = false;
+  OcrConfidence? _confidenceFilter;
 
   @override
   void initState() {
@@ -549,151 +552,452 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
   }
 
-  Future<void> _showCatalogPicker({
-    required InvoiceModel draft,
-    int? replaceIndex,
+  static String _normalizeSearchAr(String value) {
+    return ScanService.toWesternDigits(value)
+        .toLowerCase()
+        .replaceAll(RegExp(r'[أإآ]'), 'ا')
+        .replaceAll('ى', 'ي')
+        .replaceAll('ة', 'ه')
+        .replaceAll(RegExp(r'[\u064B-\u065F\u0670]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static List<String> _searchTokens(String value) {
+    return _normalizeSearchAr(value)
+        .split(RegExp(r'[\s/\-×*(),]+'))
+        .where((w) => w.length >= 2 || w == 't')
+        .toList();
+  }
+
+  ({
+    ItemTemplateModel template,
+    ProductVariantModel? variant,
+    BrandModel? brand,
+    String categoryName,
+    String unit,
+    double unitPrice,
+  }) _resolveCatalogSelection({
+    required CatalogState catalog,
+    required ItemTemplateModel template,
+    String? preferredBrandId,
+    String? fallbackBrandId,
+    String? currentUnit,
+    String? rawOcrText,
+  }) {
+    final categoryName = catalog.categories
+            .where((c) => c.id == template.categoryId)
+            .firstOrNull
+            ?.name ??
+        '';
+
+    BrandModel? resolvedBrand =
+        catalog.findBrand(preferredBrandId) ?? catalog.findBrand(fallbackBrandId);
+    ProductVariantModel? variant = resolvedBrand != null
+        ? catalog.findVariant(template.id, resolvedBrand.id)
+        : null;
+
+    if (variant == null &&
+        fallbackBrandId != null &&
+        fallbackBrandId != preferredBrandId) {
+      final fb = catalog.findBrand(fallbackBrandId);
+      if (fb != null) {
+        final fbVar = catalog.findVariant(template.id, fb.id);
+        if (fbVar != null) {
+          variant = fbVar;
+          resolvedBrand = fb;
+        }
+      }
+    }
+
+    // Brand-pairing fallback: راك (تغذية) <-> وايتكس (صرف ومواسير)
+    if (variant == null) {
+      final isDrainageCat =
+          categoryName.contains('صرف') || categoryName.contains('مواسير');
+      final pairedBrand = ScanService.detectBrandFromText(
+        isDrainageCat ? 'وايتكس' : 'راك',
+        catalog.brands,
+      );
+      if (pairedBrand != null) {
+        final pairedVar = catalog.findVariant(template.id, pairedBrand.id);
+        if (pairedVar != null) {
+          variant = pairedVar;
+          resolvedBrand = pairedBrand;
+        }
+      }
+    }
+
+    if (variant == null) {
+      final firstVar = catalog.variantsForTemplate(template.id).firstOrNull;
+      if (firstVar != null) {
+        variant = firstVar;
+        resolvedBrand = catalog.findBrand(firstVar.brandId) ?? resolvedBrand;
+      }
+    }
+
+    final pipePricing = ScanService.computePipePricing(
+      templateUnit: template.unit,
+      requestedUnit: currentUnit == 'متر' ? 'متر' : null,
+      rawOcrText: currentUnit == 'متر' ? rawOcrText : null,
+      categoryName: categoryName,
+      itemName: template.name,
+      basePrice: variant?.price ?? 0,
+    );
+
+    return (
+      template: template,
+      variant: variant,
+      brand: resolvedBrand,
+      categoryName: categoryName,
+      unit: pipePricing.unit,
+      unitPrice: pipePricing.unitPrice,
+    );
+  }
+
+  Future<ItemTemplateModel?> _pickCatalogTemplateSheet({
+    required CatalogState catalog,
+    required String? preferredBrandId,
+    required String? fallbackBrandId,
+    InvoiceItemModel? referenceItem,
+    String? title,
   }) async {
-    final catalog = ref.read(catalogProvider);
-    final brand =
-        catalog.findBrand(draft.brandId) ?? catalog.brands.firstOrNull;
+    final currentTemplate = referenceItem != null
+        ? catalog.findTemplate(referenceItem.itemTemplateId)
+        : null;
+    final refNameNorm =
+        referenceItem != null ? _normalizeSearchAr(referenceItem.itemName) : '';
+    final refTokens = referenceItem != null
+        ? _searchTokens(
+            '${referenceItem.itemName} ${referenceItem.rawOcrText ?? ''}',
+          ).toSet()
+        : <String>{};
+    final refSizeNorm =
+        referenceItem?.size != null ? _normalizeSearchAr(referenceItem!.size!) : '';
+
+    final categoryNameById = <String, String>{
+      for (final c in catalog.categories) c.id: c.name,
+    };
+
+    // Score similarity for every template relative to referenceItem
+    final similarityById = <String, int>{};
+    if (referenceItem != null) {
+      for (final t in catalog.templates) {
+        var score = 0;
+        if (t.id == referenceItem.itemTemplateId) {
+          score += 1000;
+        }
+        final tNameNorm = _normalizeSearchAr(t.name);
+        if (refNameNorm.isNotEmpty && tNameNorm == refNameNorm) {
+          score += 50;
+        } else if (refNameNorm.isNotEmpty &&
+            (tNameNorm.contains(refNameNorm) || refNameNorm.contains(tNameNorm))) {
+          score += 24;
+        }
+        final tTokens = _searchTokens(t.name);
+        for (final tok in tTokens) {
+          if (refTokens.contains(tok)) {
+            score += 10;
+          }
+        }
+        if (refSizeNorm.isNotEmpty &&
+            t.size != null &&
+            _normalizeSearchAr(t.size!) == refSizeNorm) {
+          score += 4;
+        }
+        similarityById[t.id] = score;
+      }
+    }
+
+    String? referenceCategoryId = currentTemplate?.categoryId;
+    if (referenceCategoryId == null && referenceItem != null) {
+      ItemTemplateModel? bestTpl;
+      var bestScore = 0;
+      for (final t in catalog.templates) {
+        final s = similarityById[t.id] ?? 0;
+        if (s > bestScore) {
+          bestScore = s;
+          bestTpl = t;
+        }
+      }
+      if (bestScore >= 10) {
+        referenceCategoryId = bestTpl?.categoryId;
+      }
+    }
+
+    // '__smart__' = الأقرب ونفس النوع, '__all__' = الكل, otherwise categoryId
+    String filterMode =
+        referenceItem != null ? '__smart__' : '__all__';
     String query = '';
 
-    await showModalBottomSheet<void>(
+    return showModalBottomSheet<ItemTemplateModel>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setSheetState) {
-            final matches = catalog.templates.where((t) {
-              if (query.trim().isEmpty) return true;
-              final q = query.trim().toLowerCase();
-              return t.name.toLowerCase().contains(q) ||
-                  (t.size ?? '').toLowerCase().contains(q);
-            }).toList();
+            final qNorm = _normalizeSearchAr(query);
+            final qTokens = _searchTokens(query);
+
+            final matches = <ItemTemplateModel>[];
+            for (final t in catalog.templates) {
+              if (qNorm.isNotEmpty) {
+                if (filterMode != '__smart__' &&
+                    filterMode != '__all__' &&
+                    t.categoryId != filterMode) {
+                  continue;
+                }
+                final hay = _normalizeSearchAr(
+                  '${t.name} ${t.size ?? ''} ${categoryNameById[t.categoryId] ?? ''}',
+                );
+                final matchesText = hay.contains(qNorm) ||
+                    (qTokens.isNotEmpty && qTokens.every(hay.contains));
+                final matchesAlias = !matchesText &&
+                    catalog.aliases.any(
+                      (a) =>
+                          a.itemTemplateId == t.id &&
+                          _normalizeSearchAr(a.aliasText).contains(qNorm),
+                    );
+                if (!matchesText && !matchesAlias) continue;
+                matches.add(t);
+              } else {
+                if (filterMode == '__smart__') {
+                  final sim = similarityById[t.id] ?? 0;
+                  final sameCat = referenceCategoryId != null &&
+                      t.categoryId == referenceCategoryId;
+                  if (sameCat || sim >= 10 || referenceCategoryId == null) {
+                    matches.add(t);
+                  }
+                } else if (filterMode == '__all__' ||
+                    t.categoryId == filterMode) {
+                  matches.add(t);
+                }
+              }
+            }
+
+            // Sort: current item first, then closest/similar matches, then same category, then name
+            matches.sort((a, b) {
+              final sa = (similarityById[a.id] ?? 0) +
+                  (referenceCategoryId != null &&
+                          a.categoryId == referenceCategoryId
+                      ? 5
+                      : 0);
+              final sb = (similarityById[b.id] ?? 0) +
+                  (referenceCategoryId != null &&
+                          b.categoryId == referenceCategoryId
+                      ? 5
+                      : 0);
+              if (sb != sa) return sb.compareTo(sa);
+              return a.displayLabel.compareTo(b.displayLabel);
+            });
+
+            final refCatName = referenceCategoryId != null
+                ? categoryNameById[referenceCategoryId]
+                : null;
 
             return DraggableScrollableSheet(
               expand: false,
-              initialChildSize: 0.72,
-              maxChildSize: 0.9,
+              initialChildSize: 0.78,
+              maxChildSize: 0.92,
               builder: (_, scrollCtrl) => Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  4,
+                  16,
+                  16 + MediaQuery.of(ctx).viewInsets.bottom,
+                ),
                 child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Text(
-                      replaceIndex != null
-                          ? 'ربط البند بصنف من الكتالوج (وحفظه بالقاموس)'
-                          : 'إضافة صنف من شجرة الأسعار',
+                      title ??
+                          (referenceItem != null
+                              ? 'اختر الصنف المطابق من الكتالوج'
+                              : 'إضافة صنف من شجرة الأسعار'),
+                      textAlign: TextAlign.center,
                       style: const TextStyle(
                         fontWeight: FontWeight.w800,
                         fontSize: 16,
                       ),
                     ),
+                    if (referenceItem != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'البند الحالي: ${referenceItem.displayName}${refCatName != null ? ' • $refCatName' : ''}',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade700,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 10),
                     TextField(
+                      key: const Key('smart_catalog_search_field'),
                       onChanged: (v) => setSheetState(() => query = v),
                       decoration: const InputDecoration(
-                        hintText: 'ابحث عن صنف...',
+                        hintText: 'ابحث بالاسم أو المقاس أو مسمى السباك...',
                         prefixIcon: Icon(Icons.search),
+                        isDense: true,
                       ),
                     ),
-                    const SizedBox(height: 10),
-                    Expanded(
-                      child: ListView.separated(
-                        controller: scrollCtrl,
-                        itemCount: matches.length,
-                        separatorBuilder: (_, _) => const Divider(height: 1),
-                        itemBuilder: (_, idx) {
-                          final t = matches[idx];
-                          final variant = (brand != null
-                                  ? catalog.findVariant(t.id, brand.id)
-                                  : null) ??
-                              catalog.variantsForTemplate(t.id).firstOrNull;
-                          final resolvedBrand = variant != null
-                              ? catalog.findBrand(variant.brandId) ?? brand
-                              : brand;
-
-                          return ListTile(
-                            title: Text(
-                              t.displayLabel,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w700,
+                    const SizedBox(height: 8),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          if (referenceItem != null)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 6),
+                              child: ChoiceChip(
+                                key: const Key('picker_filter_smart'),
+                                label: Text(
+                                  refCatName != null
+                                      ? 'الأقرب و$refCatName'
+                                      : 'الأقرب',
+                                ),
+                                selected: filterMode == '__smart__',
+                                onSelected: (_) => setSheetState(
+                                  () => filterMode = '__smart__',
+                                ),
                               ),
                             ),
-                            subtitle: Text(
-                              variant != null && resolvedBrand != null
-                                  ? '${resolvedBrand.name} • ${InvoiceShareService.formatCurrency(variant.price)}'
-                                  : 'غير مسعر لهذه الشركة',
+                          Padding(
+                            padding: const EdgeInsets.only(left: 6),
+                            child: ChoiceChip(
+                              key: const Key('picker_filter_all'),
+                              label: const Text('الكل'),
+                              selected: filterMode == '__all__',
+                              onSelected: (_) =>
+                                  setSheetState(() => filterMode = '__all__'),
                             ),
-                            trailing: const Icon(Icons.add_circle_outline),
-                            onTap: () {
-                              if (replaceIndex != null) {
-                                final oldItem = draft.items[replaceIndex];
-                                final rawPhrase = oldItem.rawOcrText ??
-                                    oldItem.itemName;
-                                final cleanedAlias =
-                                    ScanService.cleanAliasPhrase(rawPhrase);
-                                if (cleanedAlias.isNotEmpty) {
-                                  ref
-                                      .read(catalogProvider.notifier)
-                                      .learnAlias(cleanedAlias, t.id);
-                                }
-
-                                _updateItem(
-                                  draft,
-                                  replaceIndex,
-                                  oldItem.copyWith(
-                                    itemTemplateId: t.id,
-                                    brandId: variant?.brandId,
-                                    productVariantId: variant?.id,
-                                    brandName: resolvedBrand?.name,
-                                    itemName: t.name,
-                                    size: t.size,
-                                    unit: t.unit,
-                                    unitPrice: variant?.price ?? 0,
-                                    confidence: OcrConfidence.high,
-                                    clearNotes: true,
-                                  ),
-                                );
-                                Navigator.pop(ctx);
-                                final shownAlias = cleanedAlias.isNotEmpty
-                                    ? cleanedAlias
-                                    : rawPhrase;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      'تم ربط الصنف وحفظ "$shownAlias" في قاموس المحل',
-                                    ),
-                                  ),
-                                );
-                              } else {
-                                final newItem = InvoiceItemModel(
-                                  id: _uuid.v4(),
-                                  sortOrder: draft.items.length,
-                                  itemTemplateId: t.id,
-                                  brandId: variant?.brandId,
-                                  productVariantId: variant?.id,
-                                  brandName: resolvedBrand?.name,
-                                  itemName: t.name,
-                                  size: t.size,
-                                  unit: t.unit,
-                                  quantity: 1,
-                                  unitPrice: variant?.price ?? 0,
-                                  confidence: OcrConfidence.high,
-                                );
-                                _updateDraft(
-                                  _syncBrandSummary(
-                                    _withFormFields(draft).copyWith(
-                                      items: [...draft.items, newItem],
-                                    ),
-                                  ),
-                                );
-                                Navigator.pop(ctx);
-                              }
-                            },
-                          );
-                        },
+                          ),
+                          for (final cat in catalog.categories)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 6),
+                              child: ChoiceChip(
+                                label: Text(cat.name),
+                                selected: filterMode == cat.id,
+                                onSelected: (_) =>
+                                    setSheetState(() => filterMode = cat.id),
+                              ),
+                            ),
+                        ],
                       ),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: matches.isEmpty
+                          ? Center(
+                              child: Text(
+                                'لا توجد أصناف مطابقة للبحث',
+                                style: TextStyle(color: Colors.grey.shade600),
+                              ),
+                            )
+                          : ListView.separated(
+                              controller: scrollCtrl,
+                              itemCount: matches.length,
+                              separatorBuilder: (_, _) =>
+                                  const Divider(height: 1),
+                              itemBuilder: (_, idx) {
+                                final t = matches[idx];
+                                final isCurrent =
+                                    referenceItem?.itemTemplateId == t.id;
+                                final resolved = _resolveCatalogSelection(
+                                  catalog: catalog,
+                                  template: t,
+                                  preferredBrandId: preferredBrandId,
+                                  fallbackBrandId: fallbackBrandId,
+                                  currentUnit: referenceItem?.unit,
+                                  rawOcrText: referenceItem?.rawOcrText,
+                                );
+                                final subtitleParts = <String>[
+                                  if (resolved.categoryName.isNotEmpty)
+                                    resolved.categoryName,
+                                  if (resolved.brand != null)
+                                    resolved.brand!.name,
+                                  resolved.unit,
+                                ];
+
+                                return ListTile(
+                                  selected: isCurrent,
+                                  selectedTileColor: AppTheme.primaryColor
+                                      .withValues(alpha: 0.08),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  title: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          t.displayLabel,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                      if (isCurrent)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 6,
+                                            vertical: 2,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: AppTheme.primaryColor,
+                                            borderRadius:
+                                                BorderRadius.circular(6),
+                                          ),
+                                          child: const Text(
+                                            'الحالي',
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w700,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                  subtitle: Text(
+                                    subtitleParts.isNotEmpty
+                                        ? subtitleParts.join(' • ')
+                                        : 'غير مسعر',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey.shade700,
+                                    ),
+                                  ),
+                                  trailing: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: [
+                                      Text(
+                                        resolved.variant != null
+                                            ? InvoiceShareService
+                                                .formatCurrency(
+                                                resolved.unitPrice,
+                                              )
+                                            : 'غير مسعر',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w800,
+                                          fontSize: 13,
+                                          color: resolved.variant != null
+                                              ? AppTheme.primaryColor
+                                              : Colors.grey.shade500,
+                                        ),
+                                      ),
+                                      if (isCurrent)
+                                        const Icon(
+                                          Icons.check_circle,
+                                          size: 16,
+                                          color: AppTheme.primaryColor,
+                                        ),
+                                    ],
+                                  ),
+                                  onTap: () => Navigator.pop(ctx, t),
+                                );
+                              },
+                            ),
                     ),
                   ],
                 ),
@@ -705,16 +1009,134 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
   }
 
+  Future<void> _showCatalogPicker({
+    required InvoiceModel draft,
+    int? replaceIndex,
+  }) async {
+    final catalog = ref.read(catalogProvider);
+    final oldItem = replaceIndex != null ? draft.items[replaceIndex] : null;
+    final selectedTemplate = await _pickCatalogTemplateSheet(
+      catalog: catalog,
+      preferredBrandId: oldItem?.brandId ?? draft.brandId,
+      fallbackBrandId: draft.brandId,
+      referenceItem: oldItem,
+      title: replaceIndex != null
+          ? 'اختر الصنف من نفس النوع أو الأقرب'
+          : 'إضافة صنف من شجرة الأسعار',
+    );
+    if (selectedTemplate == null || !mounted) return;
+
+    final resolved = _resolveCatalogSelection(
+      catalog: catalog,
+      template: selectedTemplate,
+      preferredBrandId: oldItem?.brandId ?? draft.brandId,
+      fallbackBrandId: draft.brandId,
+      currentUnit: oldItem?.unit,
+      rawOcrText: oldItem?.rawOcrText,
+    );
+
+    if (replaceIndex != null && oldItem != null) {
+      final rawPhrase = oldItem.rawOcrText ?? oldItem.itemName;
+      final cleanedAlias = ScanService.cleanAliasPhrase(rawPhrase);
+      if (cleanedAlias.isNotEmpty && oldItem.itemTemplateId != selectedTemplate.id) {
+        ref
+            .read(catalogProvider.notifier)
+            .learnAlias(cleanedAlias, selectedTemplate.id);
+      }
+
+      _updateItem(
+        draft,
+        replaceIndex,
+        InvoiceItemModel(
+          id: oldItem.id,
+          sortOrder: oldItem.sortOrder,
+          rawOcrText: oldItem.rawOcrText,
+          itemTemplateId: selectedTemplate.id,
+          brandId: resolved.brand?.id,
+          productVariantId: resolved.variant?.id,
+          brandName: resolved.brand?.name,
+          itemName: selectedTemplate.name,
+          size: selectedTemplate.size,
+          unit: resolved.unit,
+          quantity: oldItem.quantity,
+          unitPrice: resolved.unitPrice,
+          confidence: OcrConfidence.high,
+          notes: null,
+        ),
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'تم تطبيق "${selectedTemplate.displayLabel}" بسعر ${InvoiceShareService.formatCurrency(resolved.unitPrice)}',
+          ),
+        ),
+      );
+    } else {
+      final newItem = InvoiceItemModel(
+        id: _uuid.v4(),
+        sortOrder: draft.items.length,
+        itemTemplateId: selectedTemplate.id,
+        brandId: resolved.brand?.id,
+        productVariantId: resolved.variant?.id,
+        brandName: resolved.brand?.name,
+        itemName: selectedTemplate.name,
+        size: selectedTemplate.size,
+        unit: resolved.unit,
+        quantity: 1,
+        unitPrice: resolved.unitPrice,
+        confidence: OcrConfidence.high,
+      );
+      _updateDraft(
+        _syncBrandSummary(
+          _withFormFields(draft).copyWith(
+            items: [...draft.items, newItem],
+          ),
+        ),
+      );
+    }
+  }
+
   Future<void> _showEditItemDialog(
     InvoiceModel draft,
     int index,
     InvoiceItemModel item,
   ) async {
+    final catalog = ref.read(catalogProvider);
     await showDialog<void>(
       context: context,
       builder: (ctx) => _EditInvoiceItemDialog(
         item: item,
-        onSave: (updatedItem) => _updateItem(draft, index, updatedItem),
+        catalog: catalog,
+        draftBrandId: draft.brandId,
+        parseNumeric: _parseNumericText,
+        onPickCatalogTemplate: (currentItem) => _pickCatalogTemplateSheet(
+          catalog: catalog,
+          preferredBrandId: currentItem.brandId ?? draft.brandId,
+          fallbackBrandId: draft.brandId,
+          referenceItem: currentItem,
+          title: 'اختر الصنف من نفس النوع أو الأقرب',
+        ),
+        resolveTemplate: (tpl, currentItem) => _resolveCatalogSelection(
+          catalog: catalog,
+          template: tpl,
+          preferredBrandId: currentItem.brandId ?? draft.brandId,
+          fallbackBrandId: draft.brandId,
+          currentUnit: currentItem.unit,
+          rawOcrText: currentItem.rawOcrText,
+        ),
+        onSave: (updatedItem) {
+          if (updatedItem.itemTemplateId != null &&
+              updatedItem.itemTemplateId != item.itemTemplateId) {
+            final rawPhrase = item.rawOcrText ?? item.itemName;
+            final cleanedAlias = ScanService.cleanAliasPhrase(rawPhrase);
+            if (cleanedAlias.isNotEmpty) {
+              ref
+                  .read(catalogProvider.notifier)
+                  .learnAlias(cleanedAlias, updatedItem.itemTemplateId!);
+            }
+          }
+          _updateItem(draft, index, updatedItem);
+        },
       ),
     );
   }
@@ -748,7 +1170,12 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
   }
 
-  Future<void> _showApprovedShareDialog(InvoiceModel invoice) async {
+  Future<void> _showApprovedShareDialog(
+    InvoiceModel invoice, {
+    String? customTitle,
+    String? customSubtitle,
+    String? saveOnlyMessage,
+  }) async {
     final shop = ref.read(catalogProvider).shopSettings;
     final messenger = ScaffoldMessenger.of(context);
     final normalizedPhone = InvoiceShareService.normalizeEgyptianWhatsAppPhone(
@@ -763,8 +1190,8 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           color: AppTheme.highConfidenceColor,
           size: 42,
         ),
-        title: const Text(
-          'تم اعتماد الفاتورة بنجاح',
+        title: Text(
+          customTitle ?? 'تم اعتماد الفاتورة بنجاح',
           textAlign: TextAlign.center,
         ),
         content: SizedBox(
@@ -774,7 +1201,8 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'فاتورة ${invoice.invoiceNumber} — الإجمالي: ${InvoiceShareService.formatCurrency(invoice.total)}',
+                customSubtitle ??
+                    'فاتورة ${invoice.invoiceNumber} — الإجمالي: ${InvoiceShareService.formatCurrency(invoice.total)}',
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontWeight: FontWeight.w700,
@@ -821,8 +1249,10 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 onPressed: () {
                   Navigator.pop(ctx);
                   messenger.showSnackBar(
-                    const SnackBar(
-                      content: Text('تم اعتماد الفاتورة وحفظها بنجاح'),
+                    SnackBar(
+                      content: Text(
+                        saveOnlyMessage ?? 'تم اعتماد الفاتورة وحفظها بنجاح',
+                      ),
                     ),
                   );
                 },
@@ -832,6 +1262,102 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  String _formatNumInput(double value) {
+    return value == value.roundToDouble()
+        ? value.toInt().toString()
+        : value.toStringAsFixed(2);
+  }
+
+  void _collectFullPayment(InvoiceModel draft) {
+    final formDraft = _withFormFields(draft);
+    final collectedNow = formDraft.remainingAmount;
+    final settled = formDraft.copyWith(
+      status: InvoiceStatus.approved,
+      paymentMethod: PaymentMethod.cash,
+      paidAmount: formDraft.total,
+      clearPaymentDueDate: true,
+    );
+
+    _paidAmountCtrl.clear();
+    _paymentError = null;
+    _hasUnsavedChanges = false;
+    _updateDraft(settled, markDirty: false);
+    ref.read(invoicesProvider.notifier).saveInvoice(settled);
+    ref
+        .read(notificationsProvider.notifier)
+        .markInvoiceNotificationsRead(settled.id);
+
+    _showApprovedShareDialog(
+      settled,
+      customTitle: 'تم تحصيل الفاتورة بالكامل',
+      customSubtitle:
+          'تم تحصيل ${InvoiceShareService.formatCurrency(collectedNow)} وإغلاق مديونية فاتورة ${settled.invoiceNumber}',
+      saveOnlyMessage: 'تم تأكيد التحصيل بالكامل وحفظ الفاتورة',
+    );
+  }
+
+  Future<void> _showPartialCollectionDialog(InvoiceModel draft) async {
+    final formDraft = _withFormFields(draft);
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _PartialPaymentCollectionDialog(
+        invoice: formDraft,
+        parseNumeric: _parseNumericText,
+        onConfirm: (collectedNow, nextDueDate) {
+          final previouslyPaid = formDraft.effectivePaidAmount;
+          final nextTotalPaid =
+              (previouslyPaid + collectedNow).clamp(0.0, formDraft.total);
+          final nextRemaining =
+              (formDraft.total - nextTotalPaid).clamp(0.0, double.infinity);
+
+          final isNowSettled = nextRemaining <= 0.01;
+          final updated = isNowSettled
+              ? formDraft.copyWith(
+                  status: InvoiceStatus.approved,
+                  paymentMethod: PaymentMethod.cash,
+                  paidAmount: formDraft.total,
+                  clearPaymentDueDate: true,
+                )
+              : formDraft.copyWith(
+                  status: InvoiceStatus.approved,
+                  paymentMethod: PaymentMethod.partialNowRestLater,
+                  paidAmount: nextTotalPaid,
+                  paymentDueDate: nextDueDate,
+                );
+
+          if (isNowSettled) {
+            _paidAmountCtrl.clear();
+          } else {
+            _paidAmountCtrl.text = _formatNumInput(nextTotalPaid);
+          }
+          _paymentError = null;
+          _hasUnsavedChanges = false;
+          _updateDraft(updated, markDirty: false);
+          ref.read(invoicesProvider.notifier).saveInvoice(updated);
+          ref
+              .read(notificationsProvider.notifier)
+              .markInvoiceNotificationsRead(updated.id);
+
+          final nextDateStr = updated.paymentDueDate != null
+              ? InvoiceModel.formatDisplayDate(updated.paymentDueDate!)
+              : null;
+          _showApprovedShareDialog(
+            updated,
+            customTitle: isNowSettled
+                ? 'تم تحصيل الفاتورة بالكامل'
+                : 'تم تسجيل دفعة وتحديث موعد الباقي',
+            customSubtitle: isNowSettled
+                ? 'تم تحصيل ${InvoiceShareService.formatCurrency(collectedNow)} وإغلاق المديونية'
+                : 'دُفع الآن ${InvoiceShareService.formatCurrency(collectedNow)} • المتبقي: ${InvoiceShareService.formatCurrency(nextRemaining)}${nextDateStr != null ? ' • موعد السداد: $nextDateStr' : ''}',
+            saveOnlyMessage: isNowSettled
+                ? 'تم تحصيل الفاتورة بالكامل وحفظها'
+                : 'تم تسجيل الدفعة وجدولة إشعار المبلغ المتبقي',
+          );
+        },
       ),
     );
   }
@@ -947,20 +1473,21 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     if (choice == 'save') {
       final saved = _saveDraft(draft, InvoiceStatus.quote);
       if (!saved) return;
-      if (context.canPop()) {
-        context.pop();
-      } else {
-        context.go('/');
-      }
+      _exitToHome();
     } else if (choice == 'discard') {
       final draftNotifier = ref.read(activeDraftProvider.notifier);
       setState(() => _hasUnsavedChanges = false);
-      if (context.canPop()) {
-        context.pop();
-      } else {
-        context.go('/');
-      }
+      _exitToHome();
       draftNotifier.clear();
+    }
+  }
+
+  void _exitToHome() {
+    ref.read(shellTabIndexProvider.notifier).setIndex(0);
+    if (context.canPop()) {
+      context.pop();
+    } else {
+      context.go('/');
     }
   }
 
@@ -969,19 +1496,26 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     final rawDraft = ref.watch(activeDraftProvider);
 
     if (rawDraft == null) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('مراجعة التسعير')),
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('لا يوجد كشف مفتوح للمراجعة حالياً'),
-              const SizedBox(height: 12),
-              ElevatedButton(
-                onPressed: () => context.go('/'),
-                child: const Text('العودة للرئيسية'),
-              ),
-            ],
+      return PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) return;
+          _exitToHome();
+        },
+        child: Scaffold(
+          appBar: AppBar(title: const Text('مراجعة التسعير')),
+          body: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('لا يوجد كشف مفتوح للمراجعة حالياً'),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: _exitToHome,
+                  child: const Text('العودة للرئيسية'),
+                ),
+              ],
+            ),
           ),
         ),
       );
@@ -991,10 +1525,14 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     final draft = _withFormFields(rawDraft);
 
     return PopScope(
-      canPop: !_hasUnsavedChanges,
+      canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        _handleUnsavedExit(draft);
+        if (_hasUnsavedChanges) {
+          _handleUnsavedExit(draft);
+        } else {
+          _exitToHome();
+        }
       },
       child: Scaffold(
       appBar: AppBar(
@@ -1221,27 +1759,68 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
               ),
               const SizedBox(height: 12),
 
-              // Confidence Legend
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
-                children: [
-                  _LegendPill(
-                    color: AppTheme.highConfidenceColor,
-                    bg: AppTheme.highConfidenceBg,
-                    text: 'مؤكد (${draft.items.where((i) => i.confidence == OcrConfidence.high).length})',
-                  ),
-                  _LegendPill(
-                    color: AppTheme.mediumConfidenceColor,
-                    bg: AppTheme.mediumConfidenceBg,
-                    text: 'محتاج تأكيد (${draft.items.where((i) => i.confidence == OcrConfidence.medium).length})',
-                  ),
-                  _LegendPill(
-                    color: AppTheme.lowConfidenceColor,
-                    bg: AppTheme.lowConfidenceBg,
-                    text: 'غير متطابق (${draft.items.where((i) => i.confidence == OcrConfidence.low).length})',
-                  ),
-                ],
+              // Confidence Filter Tabs
+              Builder(
+                builder: (context) {
+                  final highCount = draft.items
+                      .where((i) => i.confidence == OcrConfidence.high)
+                      .length;
+                  final mediumCount = draft.items
+                      .where((i) => i.confidence == OcrConfidence.medium)
+                      .length;
+                  final lowCount = draft.items
+                      .where((i) => i.confidence == OcrConfidence.low)
+                      .length;
+                  return SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        _ConfidenceFilterTab(
+                          key: const Key('review_filter_all'),
+                          label: 'الكل (${draft.items.length})',
+                          selected: _confidenceFilter == null,
+                          color: AppTheme.primaryColor,
+                          bg: const Color(0xFFE0F2FE),
+                          onTap: () =>
+                              setState(() => _confidenceFilter = null),
+                        ),
+                        const SizedBox(width: 8),
+                        _ConfidenceFilterTab(
+                          key: const Key('review_filter_high'),
+                          label: 'مؤكد ($highCount)',
+                          selected: _confidenceFilter == OcrConfidence.high,
+                          color: AppTheme.highConfidenceColor,
+                          bg: AppTheme.highConfidenceBg,
+                          onTap: () => setState(
+                            () => _confidenceFilter = OcrConfidence.high,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _ConfidenceFilterTab(
+                          key: const Key('review_filter_medium'),
+                          label: 'محتاج تأكيد ($mediumCount)',
+                          selected: _confidenceFilter == OcrConfidence.medium,
+                          color: AppTheme.mediumConfidenceColor,
+                          bg: AppTheme.mediumConfidenceBg,
+                          onTap: () => setState(
+                            () => _confidenceFilter = OcrConfidence.medium,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _ConfidenceFilterTab(
+                          key: const Key('review_filter_low'),
+                          label: 'غير متطابق ($lowCount)',
+                          selected: _confidenceFilter == OcrConfidence.low,
+                          color: AppTheme.lowConfidenceColor,
+                          bg: AppTheme.lowConfidenceBg,
+                          onTap: () => setState(
+                            () => _confidenceFilter = OcrConfidence.low,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
               const SizedBox(height: 10),
 
@@ -1255,43 +1834,105 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                     ),
                   ),
                 )
-              else
-                for (var i = 0; i < draft.items.length; i++)
-                  _ReviewItemCard(
-                    key: ValueKey(draft.items[i].id),
-                    item: draft.items[i],
-                    onIncrement: () => _updateItem(
-                      draft,
-                      i,
-                      draft.items[i].copyWith(
-                        quantity: draft.items[i].quantity + 1,
-                      ),
-                    ),
-                    onDecrement: () {
-                      if (draft.items[i].quantity > 1) {
-                        _updateItem(
-                          draft,
-                          i,
-                          draft.items[i].copyWith(
-                            quantity: draft.items[i].quantity - 1,
+              else ...[
+                Builder(
+                  builder: (context) {
+                    final visibleEntries = [
+                      for (var i = 0; i < draft.items.length; i++)
+                        if (_confidenceFilter == null ||
+                            draft.items[i].confidence == _confidenceFilter)
+                          (index: i, item: draft.items[i]),
+                    ];
+                    if (visibleEntries.isEmpty) {
+                      return Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Column(
+                            children: [
+                              const Icon(
+                                Icons.check_circle_outline_rounded,
+                                color: AppTheme.highConfidenceColor,
+                                size: 32,
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'لا توجد بنود في هذه الحالة حالياً',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                              const SizedBox(height: 6),
+                              TextButton(
+                                onPressed: () =>
+                                    setState(() => _confidenceFilter = null),
+                                child: const Text('عرض كل البنود'),
+                              ),
+                            ],
                           ),
-                        );
-                      }
-                    },
-                    onQuantityChanged: (qty) => _updateItem(
-                      draft,
-                      i,
-                      draft.items[i].copyWith(quantity: qty),
-                    ),
-                    onEdit: () => _showEditItemDialog(draft, i, draft.items[i]),
-                    onLinkToCatalog: () =>
-                        _showCatalogPicker(draft: draft, replaceIndex: i),
-                    onPickBrand: draft.items[i].itemTemplateId != null
-                        ? () =>
-                            _showPerItemBrandSheet(draft, i, draft.items[i])
-                        : null,
-                    onDelete: () => _removeItem(draft, i),
-                  ),
+                        ),
+                      );
+                    }
+                    return Column(
+                      children: [
+                        for (final entry in visibleEntries)
+                          _ReviewItemCard(
+                            key: ValueKey(entry.item.id),
+                            item: entry.item,
+                            onIncrement: () => _updateItem(
+                              draft,
+                              entry.index,
+                              entry.item.copyWith(
+                                quantity: entry.item.quantity + 1,
+                              ),
+                            ),
+                            onDecrement: () {
+                              if (entry.item.quantity > 1) {
+                                _updateItem(
+                                  draft,
+                                  entry.index,
+                                  entry.item.copyWith(
+                                    quantity: entry.item.quantity - 1,
+                                  ),
+                                );
+                              }
+                            },
+                            onQuantityChanged: (qty) => _updateItem(
+                              draft,
+                              entry.index,
+                              entry.item.copyWith(quantity: qty),
+                            ),
+                            onConfirm: entry.item.confidence !=
+                                    OcrConfidence.high
+                                ? () => _updateItem(
+                                      draft,
+                                      entry.index,
+                                      entry.item.copyWith(
+                                        confidence: OcrConfidence.high,
+                                        clearNotes: true,
+                                      ),
+                                    )
+                                : null,
+                            onEdit: () => _showEditItemDialog(
+                              draft,
+                              entry.index,
+                              entry.item,
+                            ),
+                            onLinkToCatalog: () => _showCatalogPicker(
+                              draft: draft,
+                              replaceIndex: entry.index,
+                            ),
+                            onPickBrand: entry.item.itemTemplateId != null
+                                ? () => _showPerItemBrandSheet(
+                                      draft,
+                                      entry.index,
+                                      entry.item,
+                                    )
+                                : null,
+                            onDelete: () => _removeItem(draft, entry.index),
+                          ),
+                      ],
+                    );
+                  },
+                ),
+              ],
 
               const SizedBox(height: 12),
 
@@ -1511,29 +2152,133 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
             heightFactor: 1,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 920),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _saveDraft(draft, InvoiceStatus.quote),
-                      icon: const Icon(Icons.bookmark_add_outlined),
-                      label: const Text('حفظ عرض سعر'),
+              child: draft.status == InvoiceStatus.approved &&
+                      draft.remainingAmount > 0
+                  ? Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            key: const Key('partial_collection_button'),
+                            onPressed: () =>
+                                _showPartialCollectionDialog(draft),
+                            icon: const Icon(Icons.payments_outlined),
+                            label: const Text('دفع جزء وباقي جزء'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            key: const Key('full_collection_button'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppTheme.highConfidenceColor,
+                              foregroundColor: Colors.white,
+                            ),
+                            onPressed: () => _collectFullPayment(draft),
+                            icon: const Icon(Icons.check_circle_rounded),
+                            label: Text(
+                              'تم التحصيل (${InvoiceShareService.formatCurrency(draft.remainingAmount)})',
+                            ),
+                          ),
+                        ),
+                      ],
+                    )
+                  : Builder(
+                      builder: (context) {
+                        final unconfirmedItems = draft.items
+                            .where((i) => i.confidence != OcrConfidence.high)
+                            .toList();
+                        final unconfirmedCount = unconfirmedItems.length;
+                        final canApprove =
+                            draft.items.isNotEmpty && unconfirmedCount == 0;
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (unconfirmedCount > 0) ...[
+                              InkWell(
+                                borderRadius: BorderRadius.circular(8),
+                                onTap: () {
+                                  final hasLow = unconfirmedItems.any(
+                                    (i) => i.confidence == OcrConfidence.low,
+                                  );
+                                  setState(
+                                    () => _confidenceFilter = hasLow
+                                        ? OcrConfidence.low
+                                        : OcrConfidence.medium,
+                                  );
+                                },
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.mediumConfidenceBg,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      const Icon(
+                                        Icons.info_outline_rounded,
+                                        size: 16,
+                                        color: AppTheme.mediumConfidenceColor,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Flexible(
+                                        child: Text(
+                                          'باقي $unconfirmedCount بند يحتاج تأكيد قبل الاعتماد (اضغط للعرض)',
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                            color:
+                                                AppTheme.mediumConfidenceColor,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                            ],
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: () =>
+                                        _saveDraft(draft, InvoiceStatus.quote),
+                                    icon:
+                                        const Icon(Icons.bookmark_add_outlined),
+                                    label: const Text('حفظ عرض سعر'),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  flex: 2,
+                                  child: ElevatedButton.icon(
+                                    key: const Key('review_approve_button'),
+                                    onPressed: canApprove
+                                        ? () => _saveDraft(
+                                              draft,
+                                              InvoiceStatus.approved,
+                                            )
+                                        : null,
+                                    icon:
+                                        const Icon(Icons.check_circle_outline),
+                                    label: Text(
+                                      draft.status == InvoiceStatus.approved
+                                          ? 'تحديث ومشاركة (${InvoiceShareService.formatCurrency(draft.total)})'
+                                          : 'اعتماد (${InvoiceShareService.formatCurrency(draft.total)})',
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        );
+                      },
                     ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    flex: 2,
-                    child: ElevatedButton.icon(
-                      onPressed: () =>
-                          _saveDraft(draft, InvoiceStatus.approved),
-                      icon: const Icon(Icons.check_circle_outline),
-                      label: Text(
-                        'اعتماد (${InvoiceShareService.formatCurrency(draft.total)})',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
             ),
           ),
         ),
@@ -1603,31 +2348,45 @@ class _ComparisonCard extends StatelessWidget {
   }
 }
 
-class _LegendPill extends StatelessWidget {
-  const _LegendPill({
+class _ConfidenceFilterTab extends StatelessWidget {
+  const _ConfidenceFilterTab({
+    super.key,
+    required this.label,
+    required this.selected,
     required this.color,
     required this.bg,
-    required this.text,
+    required this.onTap,
   });
 
+  final String label;
+  final bool selected;
   final Color color;
   final Color bg;
-  final String text;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
-          color: color,
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? color : bg,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected ? color : color.withValues(alpha: 0.35),
+            width: 1.2,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+            color: selected ? Colors.white : color,
+          ),
         ),
       ),
     );
@@ -1641,6 +2400,7 @@ class _ReviewItemCard extends StatefulWidget {
     required this.onIncrement,
     required this.onDecrement,
     required this.onQuantityChanged,
+    this.onConfirm,
     required this.onEdit,
     required this.onLinkToCatalog,
     required this.onPickBrand,
@@ -1651,6 +2411,7 @@ class _ReviewItemCard extends StatefulWidget {
   final VoidCallback onIncrement;
   final VoidCallback onDecrement;
   final ValueChanged<double> onQuantityChanged;
+  final VoidCallback? onConfirm;
   final VoidCallback onEdit;
   final VoidCallback onLinkToCatalog;
   final VoidCallback? onPickBrand;
@@ -1764,36 +2525,47 @@ class _ReviewItemCardState extends State<_ReviewItemCard> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    item.displayName,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 15,
+                if (widget.onPickBrand != null) ...[
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: ActionChip(
+                      avatar: const Icon(Icons.swap_vert, size: 15),
+                      label: Text(
+                        item.brandName ?? 'شركة',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      onPressed: widget.onPickBrand,
                     ),
                   ),
-                ),
-                if (widget.onPickBrand != null)
-                  ActionChip(
-                    avatar: const Icon(Icons.swap_vert, size: 15),
-                    label: Text(
-                      item.brandName ?? 'شركة',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
+                ],
+                const Spacer(),
+                if (widget.onConfirm != null)
+                  IconButton.filledTonal(
+                    key: Key('confirm_item_btn_${item.id}'),
+                    tooltip: 'تأكيد البند',
+                    style: IconButton.styleFrom(
+                      backgroundColor: AppTheme.highConfidenceBg,
+                      foregroundColor: AppTheme.highConfidenceColor,
                     ),
                     visualDensity: VisualDensity.compact,
-                    onPressed: widget.onPickBrand,
+                    icon: const Icon(Icons.check_rounded, size: 19),
+                    onPressed: widget.onConfirm,
                   ),
                 IconButton(
                   tooltip: 'تعديل السعر/الاسم',
+                  visualDensity: VisualDensity.compact,
                   icon: const Icon(Icons.edit_outlined, size: 20),
                   onPressed: widget.onEdit,
                 ),
                 IconButton(
                   tooltip: 'حذف البند',
+                  visualDensity: VisualDensity.compact,
                   icon: const Icon(
                     Icons.delete_outline,
                     size: 20,
@@ -1802,6 +2574,42 @@ class _ReviewItemCardState extends State<_ReviewItemCard> {
                   onPressed: widget.onDelete,
                 ),
               ],
+            ),
+            const SizedBox(height: 6),
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: widget.onLinkToCatalog,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  vertical: 6,
+                  horizontal: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.grey.shade200),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        item.displayName,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      size: 20,
+                      color: Colors.grey.shade600,
+                    ),
+                  ],
+                ),
+              ),
             ),
             if (item.rawOcrText != null && item.rawOcrText!.isNotEmpty)
               Text(
@@ -1941,10 +2749,29 @@ class _TotalRow extends StatelessWidget {
 class _EditInvoiceItemDialog extends StatefulWidget {
   const _EditInvoiceItemDialog({
     required this.item,
+    required this.catalog,
+    required this.draftBrandId,
+    required this.parseNumeric,
+    required this.onPickCatalogTemplate,
+    required this.resolveTemplate,
     required this.onSave,
   });
 
   final InvoiceItemModel item;
+  final CatalogState catalog;
+  final String? draftBrandId;
+  final double Function(String) parseNumeric;
+  final Future<ItemTemplateModel?> Function(InvoiceItemModel currentItem)
+      onPickCatalogTemplate;
+  final ({
+    ItemTemplateModel template,
+    ProductVariantModel? variant,
+    BrandModel? brand,
+    String categoryName,
+    String unit,
+    double unitPrice,
+  }) Function(ItemTemplateModel template, InvoiceItemModel currentItem)
+      resolveTemplate;
   final ValueChanged<InvoiceItemModel> onSave;
 
   @override
@@ -1955,13 +2782,19 @@ class _EditInvoiceItemDialogState extends State<_EditInvoiceItemDialog> {
   late final TextEditingController _nameCtrl;
   late final TextEditingController _qtyCtrl;
   late final TextEditingController _priceCtrl;
+  late InvoiceItemModel _workingItem;
+  bool _manualNameMode = false;
+
+  static String _formatNum(double v) =>
+      v == v.roundToDouble() ? v.toInt().toString() : v.toStringAsFixed(2);
 
   @override
   void initState() {
     super.initState();
+    _workingItem = widget.item;
     _nameCtrl = TextEditingController(text: widget.item.itemName);
-    _qtyCtrl = TextEditingController(text: widget.item.quantity.toString());
-    _priceCtrl = TextEditingController(text: widget.item.unitPrice.toString());
+    _qtyCtrl = TextEditingController(text: _formatNum(widget.item.quantity));
+    _priceCtrl = TextEditingController(text: _formatNum(widget.item.unitPrice));
   }
 
   @override
@@ -1972,40 +2805,139 @@ class _EditInvoiceItemDialogState extends State<_EditInvoiceItemDialog> {
     super.dispose();
   }
 
+  Future<void> _openCatalogPicker() async {
+    final picked = await widget.onPickCatalogTemplate(_workingItem);
+    if (picked == null || !mounted) return;
+    final resolved = widget.resolveTemplate(picked, _workingItem);
+    setState(() {
+      _manualNameMode = false;
+      _workingItem = InvoiceItemModel(
+        id: _workingItem.id,
+        sortOrder: _workingItem.sortOrder,
+        rawOcrText: _workingItem.rawOcrText,
+        itemTemplateId: picked.id,
+        brandId: resolved.brand?.id,
+        productVariantId: resolved.variant?.id,
+        brandName: resolved.brand?.name,
+        itemName: picked.name,
+        size: picked.size,
+        unit: resolved.unit,
+        quantity: widget.parseNumeric(_qtyCtrl.text) > 0
+            ? widget.parseNumeric(_qtyCtrl.text)
+            : _workingItem.quantity,
+        unitPrice: resolved.unitPrice,
+        confidence: OcrConfidence.high,
+        notes: null,
+      );
+      _nameCtrl.text = picked.name;
+      _priceCtrl.text = _formatNum(resolved.unitPrice);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    final metaParts = <String>[
+      if (_workingItem.size != null && _workingItem.size!.trim().isNotEmpty)
+        _workingItem.size!.trim(),
+      if (_workingItem.brandName != null &&
+          _workingItem.brandName!.trim().isNotEmpty)
+        _workingItem.brandName!.trim(),
+      _workingItem.unit,
+    ];
+
     return AlertDialog(
       title: const Text('تعديل البند'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _nameCtrl,
-            decoration: const InputDecoration(labelText: 'اسم الصنف'),
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _qtyCtrl,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(labelText: 'الكمية'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!_manualNameMode) ...[
+              InkWell(
+                key: const Key('edit_item_name_selector'),
+                borderRadius: BorderRadius.circular(10),
+                onTap: _openCatalogPicker,
+                child: InputDecorator(
+                  decoration: const InputDecoration(
+                    labelText: 'اسم الصنف (اضغط للاختيار من الكتالوج)',
+                    suffixIcon: Icon(Icons.keyboard_arrow_down_rounded),
+                  ),
+                  child: Text(
+                    _workingItem.displayName,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                    ),
+                  ),
                 ),
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: TextField(
-                  controller: _priceCtrl,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(labelText: 'سعر الوحدة'),
+            ] else ...[
+              TextField(
+                controller: _nameCtrl,
+                decoration: InputDecoration(
+                  labelText: 'اسم الصنف (يدوي)',
+                  suffixIcon: IconButton(
+                    tooltip: 'اختيار من الكتالوج',
+                    icon: const Icon(Icons.list_alt_rounded),
+                    onPressed: _openCatalogPicker,
+                  ),
                 ),
               ),
             ],
-          ),
-        ],
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    metaParts.join(' • '),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade700,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                TextButton(
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                  onPressed: () {
+                    setState(() => _manualNameMode = !_manualNameMode);
+                  },
+                  child: Text(
+                    _manualNameMode ? 'اختيار من القائمة' : 'كتابة يدوية',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    key: const Key('edit_item_qty_field'),
+                    controller: _qtyCtrl,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'الكمية'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    key: const Key('edit_item_price_field'),
+                    controller: _priceCtrl,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'سعر الوحدة'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
       actions: [
         TextButton(
@@ -2013,25 +2945,243 @@ class _EditInvoiceItemDialogState extends State<_EditInvoiceItemDialog> {
           child: const Text('إلغاء'),
         ),
         ElevatedButton(
+          key: const Key('edit_item_apply_btn'),
           onPressed: () {
-            final qty =
-                double.tryParse(_qtyCtrl.text.trim()) ?? widget.item.quantity;
-            final price =
-                double.tryParse(_priceCtrl.text.trim()) ?? widget.item.unitPrice;
+            final parsedQty = widget.parseNumeric(_qtyCtrl.text);
+            final parsedPrice = widget.parseNumeric(_priceCtrl.text);
+            final nameText = _manualNameMode
+                ? (_nameCtrl.text.trim().isEmpty
+                    ? _workingItem.itemName
+                    : _nameCtrl.text.trim())
+                : _workingItem.itemName;
             widget.onSave(
-              widget.item.copyWith(
-                itemName: _nameCtrl.text.trim().isEmpty
-                    ? widget.item.itemName
-                    : _nameCtrl.text.trim(),
-                quantity: qty > 0 ? qty : 1,
-                unitPrice: price >= 0 ? price : 0,
+              InvoiceItemModel(
+                id: _workingItem.id,
+                sortOrder: _workingItem.sortOrder,
+                rawOcrText: _workingItem.rawOcrText,
+                itemTemplateId: _workingItem.itemTemplateId,
+                brandId: _workingItem.brandId,
+                productVariantId: _workingItem.productVariantId,
+                brandName: _workingItem.brandName,
+                itemName: nameText,
+                size: _workingItem.size,
+                unit: _workingItem.unit,
+                quantity: parsedQty > 0 ? parsedQty : _workingItem.quantity,
+                unitPrice: parsedPrice >= 0 ? parsedPrice : _workingItem.unitPrice,
                 confidence: OcrConfidence.high,
-                clearNotes: true,
+                notes: null,
               ),
             );
             Navigator.pop(context);
           },
           child: const Text('تطبيق'),
+        ),
+      ],
+    );
+  }
+}
+
+class _PartialPaymentCollectionDialog extends StatefulWidget {
+  const _PartialPaymentCollectionDialog({
+    required this.invoice,
+    required this.parseNumeric,
+    required this.onConfirm,
+  });
+
+  final InvoiceModel invoice;
+  final double Function(String) parseNumeric;
+  final void Function(double collectedNow, DateTime? nextDueDate) onConfirm;
+
+  @override
+  State<_PartialPaymentCollectionDialog> createState() =>
+      _PartialPaymentCollectionDialogState();
+}
+
+class _PartialPaymentCollectionDialogState
+    extends State<_PartialPaymentCollectionDialog> {
+  late final TextEditingController _amountCtrl;
+  DateTime? _nextDueDate;
+  String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    _amountCtrl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _amountCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickNextDueDate() async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final tomorrow = today.add(const Duration(days: 1));
+    final initial = _nextDueDate ?? tomorrow;
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial.isBefore(today) ? today : initial,
+      firstDate: today,
+      lastDate: DateTime(now.year + 3),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _nextDueDate = picked;
+      _errorText = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = widget.invoice.total;
+    final previousPaid = widget.invoice.effectivePaidAmount;
+    final currentRemaining = widget.invoice.remainingAmount;
+    final enteredNow = widget.parseNumeric(_amountCtrl.text);
+    final newRemaining =
+        (currentRemaining - enteredNow).clamp(0.0, double.infinity);
+
+    return AlertDialog(
+      key: const Key('partial_collection_dialog'),
+      title: const Text('تحصيل جزء وجدولة الباقي'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF0F9FF),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'إجمالي الفاتورة: ${InvoiceShareService.formatCurrency(total)}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  Text(
+                    'المدفوع سابقاً: ${InvoiceShareService.formatCurrency(previousPaid)}',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade800),
+                  ),
+                  Text(
+                    'المتبقي الحالي: ${InvoiceShareService.formatCurrency(currentRemaining)}',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.lowConfidenceColor,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const Key('collect_now_amount_field'),
+              controller: _amountCtrl,
+              autofocus: true,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              onChanged: (_) => setState(() => _errorText = null),
+              decoration: const InputDecoration(
+                labelText: 'المبلغ المدفوع الآن (ج.م) *',
+                hintText: 'مثال: 400',
+                prefixIcon: Icon(Icons.attach_money),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: newRemaining <= 0.01
+                    ? AppTheme.highConfidenceBg
+                    : AppTheme.mediumConfidenceBg,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                newRemaining <= 0.01 && enteredNow > 0
+                    ? 'سيتم تسديد كامل المتبقي وإغلاق المديونية'
+                    : 'المتبقي الجديد بعد السداد: ${InvoiceShareService.formatCurrency(newRemaining)}',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: newRemaining <= 0.01 && enteredNow > 0
+                      ? AppTheme.highConfidenceColor
+                      : AppTheme.mediumConfidenceColor,
+                ),
+              ),
+            ),
+            if (newRemaining > 0.01) ...[
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                key: const Key('collect_next_due_date_picker'),
+                onPressed: _pickNextDueDate,
+                icon: const Icon(Icons.calendar_today_outlined),
+                label: Text(
+                  _nextDueDate != null
+                      ? 'موعد سداد الباقي: ${InvoiceModel.formatDisplayDate(_nextDueDate!)}'
+                      : 'تحديد موعد سداد المبلغ المتبقي *',
+                ),
+              ),
+            ],
+            if (_errorText != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _errorText!,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.lowConfidenceColor,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('إلغاء'),
+        ),
+        ElevatedButton.icon(
+          key: const Key('confirm_partial_collection_btn'),
+          onPressed: () {
+            final payNow = widget.parseNumeric(_amountCtrl.text);
+            if (payNow <= 0) {
+              setState(
+                () => _errorText = 'مطلوب إدخال المبلغ المدفوع الآن (أكبر من صفر)',
+              );
+              return;
+            }
+            if (payNow > currentRemaining + 0.01) {
+              setState(
+                () => _errorText = 'المبلغ المدفوع أكبر من المتبقي على العميل',
+              );
+              return;
+            }
+            final remainingAfter =
+                (currentRemaining - payNow).clamp(0.0, double.infinity);
+            if (remainingAfter > 0.01 && _nextDueDate == null) {
+              setState(
+                () => _errorText = 'مطلوب تحديد موعد سداد المبلغ المتبقي',
+              );
+              return;
+            }
+            Navigator.pop(context);
+            widget.onConfirm(
+              payNow.clamp(0.0, currentRemaining),
+              remainingAfter > 0.01 ? _nextDueDate : null,
+            );
+          },
+          icon: const Icon(Icons.save_outlined),
+          label: const Text('حفظ التحصيل'),
         ),
       ],
     );

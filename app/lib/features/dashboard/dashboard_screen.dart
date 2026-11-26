@@ -9,6 +9,7 @@ import 'package:sanitary_pricing_app/features/shell/main_shell.dart';
 import 'package:sanitary_pricing_app/models/invoice_models.dart';
 import 'package:sanitary_pricing_app/providers/catalog_provider.dart';
 import 'package:sanitary_pricing_app/providers/invoice_provider.dart';
+import 'package:sanitary_pricing_app/providers/notifications_provider.dart';
 import 'package:sanitary_pricing_app/services/invoice_share_service.dart';
 import 'package:sanitary_pricing_app/services/scan_service.dart';
 
@@ -192,19 +193,38 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     ListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        dueInv.isPaymentOverdue()
+                            ? Icons.warning_amber_rounded
+                            : Icons.schedule_rounded,
+                        color: dueInv.isPaymentOverdue()
+                            ? Colors.red.shade700
+                            : AppTheme.mediumConfidenceColor,
+                        size: 20,
+                      ),
                       title: Text(
-                        'المفروض ${dueInv.customerName.trim().isEmpty ? "العميل" : dueInv.customerName.trim()} يجيب ${InvoiceShareService.formatCurrency(dueInv.remainingAmount)} النهارده',
-                        style: const TextStyle(
+                        dueInv.paymentReminderBody(
+                          InvoiceShareService.formatCurrency(
+                            dueInv.remainingAmount,
+                          ),
+                        ),
+                        style: TextStyle(
                           fontWeight: FontWeight.w700,
                           fontSize: 13,
+                          color: dueInv.isPaymentOverdue()
+                              ? Colors.red.shade900
+                              : null,
                         ),
                       ),
                       subtitle: Text(
-                        '${dueInv.invoiceNumber} • ${dueInv.paymentMethod.arabicLabel} • الموعد: ${InvoiceModel.formatDateOnly(dueInv.paymentDueDate)}',
+                        '${dueInv.paymentReminderTitle()} • ${dueInv.paymentMethod.arabicLabel} • الموعد: ${InvoiceModel.formatDateOnly(dueInv.paymentDueDate)}',
                         style: const TextStyle(fontSize: 11),
                       ),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () {
+                        ref
+                            .read(notificationsProvider.notifier)
+                            .markInvoiceNotificationsRead(dueInv.id);
                         ref.read(activeDraftProvider.notifier).setDraft(dueInv);
                         context.push('/review');
                       },

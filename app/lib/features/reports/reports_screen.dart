@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sanitary_pricing_app/core/theme/app_theme.dart';
+import 'package:sanitary_pricing_app/features/shell/main_shell.dart';
 import 'package:sanitary_pricing_app/models/invoice_models.dart';
 import 'package:sanitary_pricing_app/providers/invoice_provider.dart';
 import 'package:sanitary_pricing_app/services/invoice_share_service.dart';
@@ -85,7 +87,18 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
     final topItems = itemStats.entries.toList()
       ..sort((a, b) => b.value.qty.compareTo(a.value.qty));
 
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        ref.read(shellTabIndexProvider.notifier).setIndex(0);
+        if (context.canPop()) {
+          context.pop();
+        } else {
+          context.go('/');
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(title: const Text('تقارير المبيعات والأداء')),
       body: Center(
         child: ConstrainedBox(
@@ -266,6 +279,7 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
             ],
           ),
         ),
+      ),
       ),
     );
   }

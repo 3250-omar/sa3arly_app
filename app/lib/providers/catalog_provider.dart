@@ -139,9 +139,12 @@ class CatalogState {
 
 class CatalogNotifier extends Notifier<CatalogState> {
   static const _uuid = Uuid();
+  bool _disposed = false;
 
   @override
   CatalogState build() {
+    _disposed = false;
+    ref.onDispose(() => _disposed = true);
     final auth = ref.watch(authProvider);
     final isDemo = AppConfig.isDemoMode;
 
@@ -185,6 +188,7 @@ class CatalogNotifier extends Notifier<CatalogState> {
 
   Future<void> _bootstrap(AuthState auth) async {
     final cached = await LocalCacheService.loadCatalogSnapshot();
+    if (_disposed) return;
     if (cached != null) {
       state = state.copyWith(
         categories: _filterObsoleteCategories(
@@ -200,13 +204,13 @@ class CatalogNotifier extends Notifier<CatalogState> {
       );
     }
 
-    if (!AppConfig.isDemoMode && auth.isAuthenticated) {
+    if (!AppConfig.isDemoMode && auth.isAuthenticated && !auth.isLoading) {
       await syncFromSupabase();
     }
   }
 
   Future<void> syncFromSupabase() async {
-    if (AppConfig.isDemoMode) return;
+    if (AppConfig.isDemoMode || _disposed) return;
     state = state.copyWith(isSyncing: true);
     final repo = SupabaseRepository();
 
@@ -225,6 +229,7 @@ class CatalogNotifier extends Notifier<CatalogState> {
       }
 
       final bundle = await repo.fetchFullCatalog();
+      if (_disposed) return;
       final filteredCategories = _filterObsoleteCategories(
         bundle.categories,
         bundle.templates,
@@ -251,8 +256,12 @@ class CatalogNotifier extends Notifier<CatalogState> {
         shopSettings: bundle.shopSettings,
         syncedAt: syncedAt,
       );
-    } catch (_) {
-      state = state.copyWith(isSyncing: false, isOffline: true);
+    } catch (e) {
+      if (_disposed) return;
+      final networkErr =
+          (e is AppException && e.isNetworkError) ||
+          SupabaseRepository.isNetworkException(e);
+      state = state.copyWith(isSyncing: false, isOffline: networkErr);
     }
   }
 

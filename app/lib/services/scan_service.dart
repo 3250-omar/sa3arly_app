@@ -22,9 +22,9 @@ class ScanService {
 
   static Future<List<Uint8List>> pickImagesFromGallery() async {
     final files = await _picker.pickMultiImage(
-      imageQuality: 65,
-      maxWidth: 1024,
-      maxHeight: 1600,
+      imageQuality: 85,
+      maxWidth: 1800,
+      maxHeight: 2400,
     );
     final result = <Uint8List>[];
     for (final file in files.take(maxImages)) {
@@ -39,9 +39,9 @@ class ScanService {
   static Future<Uint8List?> pickImageFromCamera() async {
     final file = await _picker.pickImage(
       source: ImageSource.camera,
-      imageQuality: 65,
-      maxWidth: 1024,
-      maxHeight: 1600,
+      imageQuality: 85,
+      maxWidth: 1800,
+      maxHeight: 2400,
     );
     if (file == null) return null;
     final bytes = await file.readAsBytes();
@@ -110,6 +110,55 @@ class ScanService {
     return best;
   }
 
+  static ({String unit, double unitPrice}) computePipePricing({
+    required String templateUnit,
+    required String? requestedUnit,
+    required String? rawOcrText,
+    required String categoryName,
+    required String itemName,
+    required double basePrice,
+  }) {
+    final normCat = categoryName.trim();
+    final normTplUnit = templateUnit.trim();
+    final normReqUnit = (requestedUnit ?? '').trim();
+    final rawLower = toWesternDigits(rawOcrText ?? '').trim();
+
+    final isPipe =
+        itemName.contains('ماسور') ||
+        normCat.contains('مواسير') ||
+        normTplUnit == 'عود' ||
+        normTplUnit == 'ماسورة';
+    if (!isPipe || basePrice <= 0) {
+      return (unit: normTplUnit, unitPrice: basePrice);
+    }
+
+    final isDrainage =
+        normCat.contains('صرف') || normCat.contains('مواسير');
+    final standardLengthMeters = isDrainage ? 6.0 : 4.0;
+
+    final wantsMeter = normReqUnit == 'متر' || rawLower.contains('متر');
+    final wantsWholePipe =
+        normReqUnit == 'عود' ||
+        normReqUnit == 'ماسورة' ||
+        rawLower.contains('عود');
+
+    if ((normTplUnit == 'عود' || normTplUnit == 'ماسورة') && wantsMeter) {
+      final perMeter = double.parse(
+        (basePrice / standardLengthMeters).toStringAsFixed(2),
+      );
+      return (unit: 'متر', unitPrice: perMeter);
+    }
+
+    if (normTplUnit == 'متر' && wantsWholePipe && !wantsMeter) {
+      final wholePrice = double.parse(
+        (basePrice * standardLengthMeters).toStringAsFixed(2),
+      );
+      return (unit: 'عود', unitPrice: wholePrice);
+    }
+
+    return (unit: normTplUnit, unitPrice: basePrice);
+  }
+
   /// Runs AI OCR via Supabase Edge Function when connected, or returns a
   /// realistic Egyptian sanitary ware demo scan when running in Demo Mode.
   static Future<InvoiceModel> analyzePaperImages({
@@ -160,12 +209,22 @@ class ScanService {
         : const <dynamic>[];
 
     final parsedItems = <InvoiceItemModel>[];
+    final rakBrand = detectBrandFromText('راك', catalog.brands);
+    final whitexBrand = detectBrandFromText('وايتكس', catalog.brands);
+
     for (var i = 0; i < rawItems.length; i++) {
       final row = Map<String, dynamic>.from(rawItems[i] as Map);
       final templateId = row['item_template_id'] as String?;
       final template = catalog.findTemplate(templateId);
       final rawText = row['raw_ocr_text'] as String?;
       final rawName = row['item_name'] as String?;
+      final categoryName = template == null
+          ? ''
+          : (catalog.categories
+                  .where((c) => c.id == template.categoryId)
+                  .firstOrNull
+                  ?.name ??
+              '');
 
       var resolvedBrand =
           detectBrandFromText(rawText, catalog.brands) ??
@@ -178,13 +237,38 @@ class ScanService {
           ? catalog.findVariant(template.id, resolvedBrand.id)
           : null;
 
-      if (template != null && variant == null && resolvedBrand == null) {
+      // Brand-pairing fallback: راك (تغذية) <-> وايتكس (صرف ومواسير)
+      if (template != null && variant == null) {
+        final isDrainageCat =
+            categoryName.contains('صرف') || categoryName.contains('مواسير');
+        final pairedBrand = isDrainageCat ? whitexBrand : rakBrand;
+        if (pairedBrand != null) {
+          final pairedVariant = catalog.findVariant(template.id, pairedBrand.id);
+          if (pairedVariant != null) {
+            variant = pairedVariant;
+            resolvedBrand = pairedBrand;
+          }
+        }
+      }
+
+      if (template != null && variant == null) {
         final available = catalog.variantsForTemplate(template.id);
         if (available.length == 1) {
           variant = available.first;
           resolvedBrand = catalog.findBrand(variant.brandId);
         }
       }
+
+      final baseUnit = template?.unit ?? (row['unit'] as String? ?? 'قطعة');
+      final resolvedItemName = template?.name ?? (rawName ?? 'صنف');
+      final pipePricing = computePipePricing(
+        templateUnit: baseUnit,
+        requestedUnit: row['requested_unit'] as String?,
+        rawOcrText: rawText,
+        categoryName: categoryName,
+        itemName: resolvedItemName,
+        basePrice: variant?.price ?? 0,
+      );
 
       parsedItems.add(
         InvoiceItemModel(
@@ -194,12 +278,12 @@ class ScanService {
           itemTemplateId: template?.id,
           brandId: resolvedBrand?.id,
           productVariantId: variant?.id,
-          itemName: template?.name ?? (rawName ?? 'صنف'),
+          itemName: resolvedItemName,
           size: template?.size ?? (row['size'] as String?),
           brandName: resolvedBrand?.name,
-          unit: template?.unit ?? (row['unit'] as String? ?? 'قطعة'),
+          unit: pipePricing.unit,
           quantity: (row['quantity'] as num?)?.toDouble() ?? 1,
-          unitPrice: variant?.price ?? 0,
+          unitPrice: pipePricing.unitPrice,
           confidence: OcrConfidence.fromString(row['confidence'] as String?),
           notes: row['notes'] as String?,
         ),

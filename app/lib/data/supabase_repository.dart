@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:sanitary_pricing_app/models/catalog_models.dart';
@@ -6,8 +7,9 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
 class AppException implements Exception {
-  const AppException(this.message);
+  const AppException(this.message, {this.isNetworkError = false});
   final String message;
+  final bool isNetworkError;
 
   @override
   String toString() => message;
@@ -58,6 +60,30 @@ class SupabaseRepository {
 
   SupabaseClient get _client => _clientOverride ?? Supabase.instance.client;
 
+  static bool isNetworkException(Object error) {
+    if (error is AppException) return error.isNetworkError;
+    if (error is PostgrestException ||
+        error is StorageException ||
+        error is AuthException ||
+        error is StateError) {
+      return false;
+    }
+    if (error is TimeoutException) return true;
+    final msg = error.toString().toLowerCase();
+    return msg.contains('socketexception') ||
+        msg.contains('failed host lookup') ||
+        msg.contains('failed to fetch') ||
+        msg.contains('networkerror') ||
+        msg.contains('connection refused') ||
+        msg.contains('connection reset') ||
+        msg.contains('connection closed') ||
+        msg.contains('network is unreachable') ||
+        msg.contains('clientexception') ||
+        msg.contains('timeoutexception') ||
+        msg.contains('xmlhttprequest error') ||
+        msg.contains('handshakeexception');
+  }
+
   Future<UserProfile?> fetchCurrentProfile() async {
     final user = _client.auth.currentUser;
     if (user == null) return null;
@@ -75,8 +101,11 @@ class SupabaseRepository {
         role: (data['role'] as String?) ?? 'staff',
         isActive: data['is_active'] as bool? ?? false,
       );
-    } catch (_) {
-      throw const AppException('تعذر التحقق من صلاحيات الحساب حالياً.');
+    } catch (e) {
+      throw AppException(
+        'تعذر التحقق من صلاحيات الحساب حالياً.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -128,8 +157,11 @@ class SupabaseRepository {
         aliases: aliases,
         shopSettings: shopSettings,
       );
-    } catch (_) {
-      throw const AppException('تعذر مزامنة شجرة الأصناف والأسعار.');
+    } catch (e) {
+      throw AppException(
+        'تعذر مزامنة شجرة الأصناف والأسعار.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -142,8 +174,11 @@ class SupabaseRepository {
           .select()
           .single();
       return CategoryModel.fromJson(Map<String, dynamic>.from(row));
-    } catch (_) {
-      throw const AppException('تعذر حفظ القسم في قاعدة البيانات.');
+    } catch (e) {
+      throw AppException(
+        'تعذر حفظ القسم في قاعدة البيانات.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -158,8 +193,11 @@ class SupabaseRepository {
           .select()
           .single();
       return BrandModel.fromJson(Map<String, dynamic>.from(row));
-    } catch (_) {
-      throw const AppException('تعذر حفظ الشركة في قاعدة البيانات.');
+    } catch (e) {
+      throw AppException(
+        'تعذر حفظ الشركة في قاعدة البيانات.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -175,8 +213,11 @@ class SupabaseRepository {
               onConflict: 'item_template_id,brand_id',
             );
       }
-    } catch (_) {
-      throw const AppException('تعذر حفظ الصنف والأسعار على السيرفر.');
+    } catch (e) {
+      throw AppException(
+        'تعذر حفظ الصنف والأسعار على السيرفر.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -186,8 +227,11 @@ class SupabaseRepository {
             variant.toJson(),
             onConflict: 'item_template_id,brand_id',
           );
-    } catch (_) {
-      throw const AppException('تعذر تحديث سعر الصنف.');
+    } catch (e) {
+      throw AppException(
+        'تعذر تحديث سعر الصنف.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -205,8 +249,11 @@ class SupabaseRepository {
               onConflict: 'item_template_id,brand_id',
             );
       }
-    } catch (_) {
-      throw const AppException('تعذر تحديث أسعار الأصناف على السيرفر.');
+    } catch (e) {
+      throw AppException(
+        'تعذر تحديث أسعار الأصناف على السيرفر.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -218,8 +265,11 @@ class SupabaseRepository {
       } else {
         await _client.from('shop_settings').insert(payload);
       }
-    } catch (_) {
-      throw const AppException('تعذر حفظ بيانات المحل.');
+    } catch (e) {
+      throw AppException(
+        'تعذر حفظ بيانات المحل.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -236,8 +286,11 @@ class SupabaseRepository {
       // Ignore duplicate normalized alias error (23505)
       if (e.code == '23505') return;
       throw const AppException('تعذر حفظ المسمى في القاموس.');
-    } catch (_) {
-      throw const AppException('تعذر حفظ المسمى في القاموس.');
+    } catch (e) {
+      throw AppException(
+        'تعذر حفظ المسمى في القاموس.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -260,8 +313,11 @@ class SupabaseRepository {
         throw const AppException('هذا المسمى مسجل بالفعل في القاموس.');
       }
       throw const AppException('تعذر حفظ المسمى في القاموس.');
-    } catch (_) {
-      throw const AppException('تعذر حفظ المسمى في القاموس.');
+    } catch (e) {
+      throw AppException(
+        'تعذر حفظ المسمى في القاموس.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -280,16 +336,22 @@ class SupabaseRepository {
         throw const AppException('هذا المسمى مسجل بالفعل في القاموس.');
       }
       throw const AppException('تعذر تحديث المسمى في القاموس.');
-    } catch (_) {
-      throw const AppException('تعذر تحديث المسمى في القاموس.');
+    } catch (e) {
+      throw AppException(
+        'تعذر تحديث المسمى في القاموس.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
   Future<void> deleteAlias(String aliasId) async {
     try {
       await _client.from('item_aliases').delete().eq('id', aliasId);
-    } catch (_) {
-      throw const AppException('تعذر حذف المسمى — متاح للمدير فقط.');
+    } catch (e) {
+      throw AppException(
+        'تعذر حذف المسمى — متاح للمدير فقط.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -307,8 +369,11 @@ class SupabaseRepository {
                 isActive: e['is_active'] as bool? ?? true,
               ))
           .toList();
-    } catch (_) {
-      throw const AppException('تعذر تحميل قائمة الموظفين.');
+    } catch (e) {
+      throw AppException(
+        'تعذر تحميل قائمة الموظفين.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -321,8 +386,11 @@ class SupabaseRepository {
       await _client
           .from('profiles')
           .update({'role': role, 'is_active': isActive}).eq('id', id);
-    } catch (_) {
-      throw const AppException('تعذر تحديث صلاحيات الموظف.');
+    } catch (e) {
+      throw AppException(
+        'تعذر تحديث صلاحيات الموظف.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -336,8 +404,11 @@ class SupabaseRepository {
       return (rows as List)
           .map((e) => InvoiceModel.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList();
-    } catch (_) {
-      throw const AppException('تعذر تحميل سجل الفواتير من السيرفر.');
+    } catch (e) {
+      throw AppException(
+        'تعذر تحميل سجل الفواتير من السيرفر.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
@@ -384,7 +455,24 @@ class SupabaseRepository {
       }
 
       final dbPayload = invoice.copyWith(imagePaths: paths).toDbRow();
-      await _client.from('invoices').upsert(dbPayload, onConflict: 'id');
+      try {
+        await _client.from('invoices').upsert(dbPayload, onConflict: 'id');
+      } on PostgrestException catch (e) {
+        if (e.code == '23505') {
+          final cleanId = invoice.id.replaceAll('-', '');
+          final suffix = (cleanId.length >= 4 ? cleanId.substring(0, 4) : cleanId)
+              .toUpperCase();
+          final retryPayload = invoice
+              .copyWith(
+                invoiceNumber: '${invoice.invoiceNumber}-$suffix',
+                imagePaths: paths,
+              )
+              .toDbRow();
+          await _client.from('invoices').upsert(retryPayload, onConflict: 'id');
+        } else {
+          rethrow;
+        }
+      }
 
       // Replace items cleanly for this invoice
       await _client
@@ -401,15 +489,21 @@ class SupabaseRepository {
       }
     } catch (e) {
       if (e is AppException) rethrow;
-      throw const AppException('تعذر مزامنة الفاتورة مع السيرفر.');
+      throw AppException(
+        'تعذر مزامنة الفاتورة مع السيرفر.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 
   Future<void> deleteInvoice(String invoiceId) async {
     try {
       await _client.from('invoices').delete().eq('id', invoiceId);
-    } catch (_) {
-      throw const AppException('تعذر حذف الفاتورة — هذه العملية متاحة للمدير فقط.');
+    } catch (e) {
+      throw AppException(
+        'تعذر حذف الفاتورة — هذه العملية متاحة للمدير فقط.',
+        isNetworkError: isNetworkException(e),
+      );
     }
   }
 

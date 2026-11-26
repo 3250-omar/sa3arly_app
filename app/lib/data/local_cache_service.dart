@@ -31,6 +31,9 @@ class LocalCacheService {
   static const _kInvoicesKey = 'cached_invoices_v1';
   static const _kPendingInvoiceIdsKey = 'pending_invoice_ids_v1';
   static const _kPendingAliasesKey = 'pending_aliases_v1';
+  static const _kReadNotificationIdsKey = 'read_notification_ids_v1';
+  static const _kDeliveredDeviceNotificationsKey =
+      'delivered_device_notifications_v1';
 
   static Future<void> saveCatalogSnapshot({
     required List<CategoryModel> categories,
@@ -174,11 +177,51 @@ class LocalCacheService {
     await prefs.remove(_kPendingAliasesKey);
   }
 
+  static Future<Set<String>> loadReadNotificationIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(_kReadNotificationIdsKey) ?? const [];
+    return list.toSet();
+  }
+
+  static Future<void> markNotificationRead(String notificationId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final ids =
+        (prefs.getStringList(_kReadNotificationIdsKey) ?? const []).toSet()
+          ..add(notificationId);
+    await prefs.setStringList(_kReadNotificationIdsKey, ids.toList());
+  }
+
+  static Future<void> markAllNotificationsRead(Iterable<String> notificationIds) async {
+    final prefs = await SharedPreferences.getInstance();
+    final ids =
+        (prefs.getStringList(_kReadNotificationIdsKey) ?? const []).toSet()
+          ..addAll(notificationIds);
+    await prefs.setStringList(_kReadNotificationIdsKey, ids.toList());
+  }
+
+  static Future<Set<String>> loadDeliveredDeviceNotificationKeys() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list =
+        prefs.getStringList(_kDeliveredDeviceNotificationsKey) ?? const [];
+    return list.toSet();
+  }
+
+  static Future<void> markDeviceNotificationDelivered(String key) async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys =
+        (prefs.getStringList(_kDeliveredDeviceNotificationsKey) ?? const [])
+            .toSet()
+          ..add(key);
+    await prefs.setStringList(_kDeliveredDeviceNotificationsKey, keys.toList());
+  }
+
   static Future<void> clearSessionCache() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kCatalogKey);
     await prefs.remove(_kInvoicesKey);
     await prefs.remove(_kPendingInvoiceIdsKey);
     await prefs.remove(_kPendingAliasesKey);
+    await prefs.remove(_kReadNotificationIdsKey);
+    await prefs.remove(_kDeliveredDeviceNotificationsKey);
   }
 }

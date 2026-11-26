@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -7,10 +8,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sanitary_pricing_app/data/demo_catalog_data.dart';
+import 'package:sanitary_pricing_app/data/supabase_repository.dart';
+import 'package:sanitary_pricing_app/features/shell/main_shell.dart';
 import 'package:sanitary_pricing_app/main.dart';
 import 'package:sanitary_pricing_app/models/catalog_models.dart';
 import 'package:sanitary_pricing_app/models/invoice_models.dart';
 import 'package:sanitary_pricing_app/providers/catalog_provider.dart';
+import 'package:sanitary_pricing_app/providers/invoice_provider.dart';
 import 'package:sanitary_pricing_app/services/catalog_csv_service.dart';
 import 'package:sanitary_pricing_app/services/invoice_share_service.dart';
 import 'package:sanitary_pricing_app/services/scan_service.dart';
@@ -596,9 +600,7 @@ void main() {
     expect(parsed.rows.first.price, 16.8);
   });
 
-  test(
-      'CatalogCsvService evaluates uncached multi-sheet formulas and prefixed XML namespaces',
-      () {
+  test('CatalogCsvService evaluates uncached multi-sheet formulas and prefixed XML namespaces', () {
     ArchiveFile xmlEntry(String path, String xml) {
       final bytes = utf8.encode(xml);
       return ArchiveFile(path, bytes.length, bytes);
@@ -701,80 +703,77 @@ void main() {
     expect(parsed.rows.first.price, 16.8);
   });
 
-  test(
-    'CatalogNotifier.applyProfitMarkup recalculates selling prices from commercialPrice with filters',
-    () async {
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
+  test('CatalogNotifier.applyProfitMarkup recalculates selling prices from commercialPrice with filters', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
 
-      final notifier = container.read(catalogProvider.notifier);
-      final parsed = CatalogCsvService.parseImportText(
-        'القسم\tاسم الصنف\tالمقاس\tالوحدة\tالشركة\tالسعر\n'
-        'صرف\tكوع عادي\t50 مم\tقطعة\tالشريف\t100\n'
-        'صرف\tكوع عادي\t50 مم\tقطعة\tBR\t80',
-      );
+    final notifier = container.read(catalogProvider.notifier);
+    final parsed = CatalogCsvService.parseImportText(
+      'القسم\tاسم الصنف\tالمقاس\tالوحدة\tالشركة\tالسعر\n'
+      'صرف\tكوع عادي\t50 مم\tقطعة\tالشريف\t100\n'
+      'صرف\tكوع عادي\t50 مم\tقطعة\tBR\t80',
+    );
 
-      final imported = await notifier.importCatalogRows(
-        parsed.rows,
-        markupType: ProfitMarkupType.percent,
-        markupValue: 20,
-      );
-      expect(imported, 2);
+    final imported = await notifier.importCatalogRows(
+      parsed.rows,
+      markupType: ProfitMarkupType.percent,
+      markupValue: 20,
+    );
+    expect(imported, 2);
 
-      var state = container.read(catalogProvider);
-      final tpl = state.templates.firstWhere((t) => t.name == 'كوع عادي');
-      final shBrand = state.brands.firstWhere((b) => b.name == 'الشريف');
-      final brBrand = state.brands.firstWhere((b) => b.name == 'BR');
+    var state = container.read(catalogProvider);
+    final tpl = state.templates.firstWhere((t) => t.name == 'كوع عادي');
+    final shBrand = state.brands.firstWhere((b) => b.name == 'الشريف');
+    final brBrand = state.brands.firstWhere((b) => b.name == 'BR');
 
-      // Pick an existing demo variant without commercialPrice to ensure it stays untouched
-      final demoVariantBefore = state.variants.firstWhere(
-        (v) => v.commercialPrice == null,
-      );
+    // Pick an existing demo variant without commercialPrice to ensure it stays untouched
+    final demoVariantBefore = state.variants.firstWhere(
+      (v) => v.commercialPrice == null,
+    );
 
-      // 1. Re-calculate percent markup ONLY for الشريف
-      final updatedShCount = await notifier.applyProfitMarkup(
-        markupType: ProfitMarkupType.percent,
-        markupValue: 30,
-        brandId: shBrand.id,
-      );
-      expect(updatedShCount, 1);
+    // 1. Re-calculate percent markup ONLY for الشريف
+    final updatedShCount = await notifier.applyProfitMarkup(
+      markupType: ProfitMarkupType.percent,
+      markupValue: 30,
+      brandId: shBrand.id,
+    );
+    expect(updatedShCount, 1);
 
-      state = container.read(catalogProvider);
-      final shVar = state.variants.firstWhere(
-        (v) => v.itemTemplateId == tpl.id && v.brandId == shBrand.id,
-      );
-      final brVar = state.variants.firstWhere(
-        (v) => v.itemTemplateId == tpl.id && v.brandId == brBrand.id,
-      );
-      expect(shVar.commercialPrice, 100);
-      expect(shVar.price, 130);
-      expect(brVar.commercialPrice, 80);
-      expect(brVar.price, 96); // unchanged 20%
+    state = container.read(catalogProvider);
+    final shVar = state.variants.firstWhere(
+      (v) => v.itemTemplateId == tpl.id && v.brandId == shBrand.id,
+    );
+    final brVar = state.variants.firstWhere(
+      (v) => v.itemTemplateId == tpl.id && v.brandId == brBrand.id,
+    );
+    expect(shVar.commercialPrice, 100);
+    expect(shVar.price, 130);
+    expect(brVar.commercialPrice, 80);
+    expect(brVar.price, 96); // unchanged 20%
 
-      // 2. Re-calculate fixed markup (+15) across all items with commercialPrice
-      final updatedAllCount = await notifier.applyProfitMarkup(
-        markupType: ProfitMarkupType.fixed,
-        markupValue: 15,
-      );
-      expect(updatedAllCount, 2);
+    // 2. Re-calculate fixed markup (+15) across all items with commercialPrice
+    final updatedAllCount = await notifier.applyProfitMarkup(
+      markupType: ProfitMarkupType.fixed,
+      markupValue: 15,
+    );
+    expect(updatedAllCount, 2);
 
-      state = container.read(catalogProvider);
-      final shVar2 = state.variants.firstWhere(
-        (v) => v.itemTemplateId == tpl.id && v.brandId == shBrand.id,
-      );
-      final brVar2 = state.variants.firstWhere(
-        (v) => v.itemTemplateId == tpl.id && v.brandId == brBrand.id,
-      );
-      final demoVariantAfter = state.variants.firstWhere(
-        (v) => v.id == demoVariantBefore.id,
-      );
-      expect(shVar2.commercialPrice, 100);
-      expect(shVar2.price, 115);
-      expect(brVar2.commercialPrice, 80);
-      expect(brVar2.price, 95);
-      expect(demoVariantAfter.price, demoVariantBefore.price);
-    },
-  );
+    state = container.read(catalogProvider);
+    final shVar2 = state.variants.firstWhere(
+      (v) => v.itemTemplateId == tpl.id && v.brandId == shBrand.id,
+    );
+    final brVar2 = state.variants.firstWhere(
+      (v) => v.itemTemplateId == tpl.id && v.brandId == brBrand.id,
+    );
+    final demoVariantAfter = state.variants.firstWhere(
+      (v) => v.id == demoVariantBefore.id,
+    );
+    expect(shVar2.commercialPrice, 100);
+    expect(shVar2.price, 115);
+    expect(brVar2.commercialPrice, 80);
+    expect(brVar2.price, 95);
+    expect(demoVariantAfter.price, demoVariantBefore.price);
+  });
 
   testWidgets(
     'Update profit margin dialog recalculates selling prices after import',
@@ -856,51 +855,48 @@ void main() {
     },
   );
 
-  test(
-    'calculateDiscountedCommercialPrice and importCatalogRows apply company discount before profit markup',
-    () async {
-      expect(calculateDiscountedCommercialPrice(100, 15), 85);
+  test('calculateDiscountedCommercialPrice and importCatalogRows apply company discount before profit markup', () async {
+    expect(calculateDiscountedCommercialPrice(100, 15), 85);
 
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
 
-      final notifier = container.read(catalogProvider.notifier);
-      final parsed = CatalogCsvService.parseImportText(
-        'القسم\tاسم الصنف\tالمقاس\tالوحدة\tالشركة\tالسعر\n'
-        'صرف\tتيه لحام\t50 مم\tقطعة\tالشريف\t100',
-      );
+    final notifier = container.read(catalogProvider.notifier);
+    final parsed = CatalogCsvService.parseImportText(
+      'القسم\tاسم الصنف\tالمقاس\tالوحدة\tالشركة\tالسعر\n'
+      'صرف\tتيه لحام\t50 مم\tقطعة\tالشريف\t100',
+    );
 
-      final imported = await notifier.importCatalogRows(
-        parsed.rows,
-        markupType: ProfitMarkupType.percent,
-        markupValue: 20,
-        companyDiscountPercent: 15,
-      );
-      expect(imported, 1);
+    final imported = await notifier.importCatalogRows(
+      parsed.rows,
+      markupType: ProfitMarkupType.percent,
+      markupValue: 20,
+      companyDiscountPercent: 15,
+    );
+    expect(imported, 1);
 
-      var state = container.read(catalogProvider);
-      final tpl = state.templates.firstWhere((t) => t.name == 'تيه لحام');
-      final shBrand = state.brands.firstWhere((b) => b.name == 'الشريف');
-      final v1 = state.variants.firstWhere(
-        (v) => v.itemTemplateId == tpl.id && v.brandId == shBrand.id,
-      );
-      expect(v1.commercialPrice, 85);
-      expect(v1.price, 102);
+    var state = container.read(catalogProvider);
+    final tpl = state.templates.firstWhere((t) => t.name == 'تيه لحام');
+    final shBrand = state.brands.firstWhere((b) => b.name == 'الشريف');
+    final v1 = state.variants.firstWhere(
+      (v) => v.itemTemplateId == tpl.id && v.brandId == shBrand.id,
+    );
+    expect(v1.commercialPrice, 85);
+    expect(v1.price, 102);
 
-      // Post-upload profit update recalculates from the discounted commercial price (85)
-      await notifier.applyProfitMarkup(
-        markupType: ProfitMarkupType.percent,
-        markupValue: 10,
-        brandId: shBrand.id,
-      );
-      state = container.read(catalogProvider);
-      final v2 = state.variants.firstWhere(
-        (v) => v.itemTemplateId == tpl.id && v.brandId == shBrand.id,
-      );
-      expect(v2.commercialPrice, 85);
-      expect(v2.price, 93.5);
-    },
-  );
+    // Post-upload profit update recalculates from the discounted commercial price (85)
+    await notifier.applyProfitMarkup(
+      markupType: ProfitMarkupType.percent,
+      markupValue: 10,
+      brandId: shBrand.id,
+    );
+    state = container.read(catalogProvider);
+    final v2 = state.variants.firstWhere(
+      (v) => v.itemTemplateId == tpl.id && v.brandId == shBrand.id,
+    );
+    expect(v2.commercialPrice, 85);
+    expect(v2.price, 93.5);
+  });
 
   testWidgets(
     'Excel import dialog applies optional company discount before profit markup',
@@ -927,11 +923,15 @@ void main() {
       await tester.tap(find.byKey(const Key('import_price_mode_commercial')));
       await tester.pumpAndSettle();
 
-      await tester.ensureVisible(find.byKey(const Key('company_discount_toggle')));
+      await tester.ensureVisible(
+        find.byKey(const Key('company_discount_toggle')),
+      );
       await tester.tap(find.byKey(const Key('company_discount_toggle')));
       await tester.pumpAndSettle();
 
-      await tester.ensureVisible(find.byKey(const Key('company_discount_field')));
+      await tester.ensureVisible(
+        find.byKey(const Key('company_discount_field')),
+      );
       await tester.enterText(
         find.byKey(const Key('company_discount_field')),
         '10',
@@ -955,68 +955,65 @@ void main() {
     },
   );
 
-  test('CatalogNotifier normalizes وصلات صرف category into صرف on import', () async {
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-
-    final notifier = container.read(catalogProvider.notifier);
-    final parsed = CatalogCsvService.parseImportText(
-      'القسم\tاسم الصنف\tالمقاس\tالوحدة\tالشركة\tالسعر\n'
-      'وصلات صرف\tطربوش تهوية\t4 بوصة\tقطعة\tالشريف\t55',
-    );
-
-    final count = await notifier.importCatalogRows(
-      parsed.rows,
-      markupType: ProfitMarkupType.percent,
-      markupValue: 10,
-    );
-    expect(count, 1);
-
-    final state = container.read(catalogProvider);
-    expect(state.categories.any((c) => c.name == 'وصلات صرف'), isFalse);
-    final drainCat = state.categories.firstWhere((c) => c.name == 'صرف');
-    final tpl = state.templates.firstWhere((t) => t.name == 'طربوش تهوية');
-    expect(tpl.categoryId, drainCat.id);
-  });
-
   test(
-    'InvoiceShareService normalizes Egyptian customer phone and builds wa.me URI',
-    () {
-      expect(
-        InvoiceShareService.normalizeEgyptianWhatsAppPhone('٠١٠١٢٣٤٥٦٧٨'),
-        '201012345678',
-      );
-      expect(
-        InvoiceShareService.normalizeEgyptianWhatsAppPhone('00201128543192'),
-        '201128543192',
-      );
-      expect(
-        InvoiceShareService.normalizeEgyptianWhatsAppPhone('1234'),
-        isNull,
+    'CatalogNotifier normalizes وصلات صرف category into صرف on import',
+    () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      final notifier = container.read(catalogProvider.notifier);
+      final parsed = CatalogCsvService.parseImportText(
+        'القسم\tاسم الصنف\tالمقاس\tالوحدة\tالشركة\tالسعر\n'
+        'وصلات صرف\tطربوش تهوية\t4 بوصة\tقطعة\tالشريف\t55',
       );
 
-      final invWithPhone = InvoiceModel(
-        id: 'w1',
-        invoiceNumber: 'INV-00050',
-        customerName: 'أحمد علي',
-        customerPhone: '01012345678',
-        createdAt: DateTime(2026, 11, 25),
+      final count = await notifier.importCatalogRows(
+        parsed.rows,
+        markupType: ProfitMarkupType.percent,
+        markupValue: 10,
       );
-      final uriWithPhone = InvoiceShareService.buildWhatsAppUri(
-        invoice: invWithPhone,
-        shop: DemoCatalogData.defaultSettings,
-      );
-      expect(uriWithPhone.host, 'wa.me');
-      expect(uriWithPhone.path, '/201012345678');
-      expect(uriWithPhone.queryParameters['text'], contains('أحمد علي'));
+      expect(count, 1);
 
-      final uriNoPhone = InvoiceShareService.buildWhatsAppUri(
-        invoice: invWithPhone.copyWith(customerPhone: ''),
-        shop: DemoCatalogData.defaultSettings,
-      );
-      expect(uriNoPhone.path, '/');
+      final state = container.read(catalogProvider);
+      expect(state.categories.any((c) => c.name == 'وصلات صرف'), isFalse);
+      final drainCat = state.categories.firstWhere((c) => c.name == 'صرف');
+      final tpl = state.templates.firstWhere((t) => t.name == 'طربوش تهوية');
+      expect(tpl.categoryId, drainCat.id);
     },
   );
+
+  test('InvoiceShareService normalizes Egyptian customer phone and builds wa.me URI', () {
+    expect(
+      InvoiceShareService.normalizeEgyptianWhatsAppPhone('٠١٠١٢٣٤٥٦٧٨'),
+      '201012345678',
+    );
+    expect(
+      InvoiceShareService.normalizeEgyptianWhatsAppPhone('00201128543192'),
+      '201128543192',
+    );
+    expect(InvoiceShareService.normalizeEgyptianWhatsAppPhone('1234'), isNull);
+
+    final invWithPhone = InvoiceModel(
+      id: 'w1',
+      invoiceNumber: 'INV-00050',
+      customerName: 'أحمد علي',
+      customerPhone: '01012345678',
+      createdAt: DateTime(2026, 11, 25),
+    );
+    final uriWithPhone = InvoiceShareService.buildWhatsAppUri(
+      invoice: invWithPhone,
+      shop: DemoCatalogData.defaultSettings,
+    );
+    expect(uriWithPhone.host, 'wa.me');
+    expect(uriWithPhone.path, '/201012345678');
+    expect(uriWithPhone.queryParameters['text'], contains('أحمد علي'));
+
+    final uriNoPhone = InvoiceShareService.buildWhatsAppUri(
+      invoice: invWithPhone.copyWith(customerPhone: ''),
+      shop: DemoCatalogData.defaultSettings,
+    );
+    expect(uriNoPhone.path, '/');
+  });
 
   testWidgets(
     'ReviewScreen hides inline share buttons, validates customer name, and shows WhatsApp/PDF popup after approval',
@@ -1038,7 +1035,28 @@ void main() {
       expect(find.text('مشاركة PDF (واتساب / تليجرام)'), findsNothing);
       expect(find.text('معاينة / طباعة PDF'), findsNothing);
 
+      // Confirm all unconfirmed items via filter tabs so Approve button becomes enabled
+      for (final filterKey in [
+        const Key('review_filter_medium'),
+        const Key('review_filter_low'),
+      ]) {
+        await tester.ensureVisible(find.byKey(filterKey));
+        await tester.tap(find.byKey(filterKey));
+        await tester.pumpAndSettle();
+        while (find.byIcon(Icons.check_rounded).evaluate().isNotEmpty) {
+          await tester.tap(find.byIcon(Icons.check_rounded).first);
+          await tester.pumpAndSettle();
+        }
+      }
+      await tester.tap(find.byKey(const Key('review_filter_all')));
+      await tester.pumpAndSettle();
+
       // Clear customer name and verify validation prevents approval
+      await tester.dragUntilVisible(
+        find.byKey(const Key('review_customer_name_field')),
+        find.byType(ListView).first,
+        const Offset(0, 200),
+      );
       await tester.enterText(
         find.byKey(const Key('review_customer_name_field')),
         '',
@@ -1081,55 +1099,52 @@ void main() {
     },
   );
 
-  test(
-    'PaymentMethod and InvoiceModel compute paid/remaining amounts, DB payload, and share text',
-    () {
-      final inv = InvoiceModel(
-        id: 'pay-1',
-        invoiceNumber: 'INV-00100',
-        status: InvoiceStatus.approved,
-        customerName: 'حسن إبراهيم',
-        paymentMethod: PaymentMethod.deferredWithDeposit,
-        paidAmount: 400,
-        paymentDueDate: DateTime(2026, 12, 10),
-        createdAt: DateTime(2026, 11, 25),
-        items: const [
-          InvoiceItemModel(
-            id: 'pi-1',
-            itemName: 'ماسورة',
-            quantity: 10,
-            unitPrice: 100,
-          ),
-        ],
-      );
+  test('PaymentMethod and InvoiceModel compute paid/remaining amounts, DB payload, and share text', () {
+    final inv = InvoiceModel(
+      id: 'pay-1',
+      invoiceNumber: 'INV-00100',
+      status: InvoiceStatus.approved,
+      customerName: 'حسن إبراهيم',
+      paymentMethod: PaymentMethod.deferredWithDeposit,
+      paidAmount: 400,
+      paymentDueDate: DateTime(2026, 12, 10),
+      createdAt: DateTime(2026, 11, 25),
+      items: const [
+        InvoiceItemModel(
+          id: 'pi-1',
+          itemName: 'ماسورة',
+          quantity: 10,
+          unitPrice: 100,
+        ),
+      ],
+    );
 
-      expect(inv.total, 1000);
-      expect(inv.effectivePaidAmount, 400);
-      expect(inv.remainingAmount, 600);
+    expect(inv.total, 1000);
+    expect(inv.effectivePaidAmount, 400);
+    expect(inv.remainingAmount, 600);
 
-      final dbRow = inv.toDbRow();
-      expect(dbRow['payment_method'], 'deferred_with_deposit');
-      expect(dbRow['paid_amount'], 400);
-      expect(dbRow['payment_due_date'], '2026-12-10');
+    final dbRow = inv.toDbRow();
+    expect(dbRow['payment_method'], 'deferred_with_deposit');
+    expect(dbRow['paid_amount'], 400);
+    expect(dbRow['payment_due_date'], '2026-12-10');
 
-      final decoded = InvoiceModel.fromJson({
-        ...inv.toCacheJson(),
-        'invoice_items': const [],
-      });
-      expect(decoded.paymentMethod, PaymentMethod.deferredWithDeposit);
-      expect(decoded.paidAmount, 400);
-      expect(decoded.paymentDueDate, DateTime(2026, 12, 10));
+    final decoded = InvoiceModel.fromJson({
+      ...inv.toCacheJson(),
+      'invoice_items': const [],
+    });
+    expect(decoded.paymentMethod, PaymentMethod.deferredWithDeposit);
+    expect(decoded.paidAmount, 400);
+    expect(decoded.paymentDueDate, DateTime(2026, 12, 10));
 
-      final shareText = InvoiceShareService.buildShareText(
-        inv,
-        DemoCatalogData.defaultSettings,
-      );
-      expect(shareText, contains('طريقة التحصيل: آجل بمقدم'));
-      expect(shareText, contains('المدفوع / المقدم: 400 ج.م'));
-      expect(shareText, contains('المتبقي: 600 ج.م'));
-      expect(shareText, contains('موعد السداد: 2026-12-10'));
-    },
-  );
+    final shareText = InvoiceShareService.buildShareText(
+      inv,
+      DemoCatalogData.defaultSettings,
+    );
+    expect(shareText, contains('طريقة التحصيل: آجل بمقدم'));
+    expect(shareText, contains('المدفوع / المقدم: 400 ج.م'));
+    expect(shareText, contains('المتبقي: 600 ج.م'));
+    expect(shareText, contains('موعد السداد: 2026-12-10'));
+  });
 
   testWidgets(
     'ReviewScreen shows conditional payment collection fields and validates due date on approval',
@@ -1179,6 +1194,31 @@ void main() {
 
       expect(find.byKey(const Key('paid_amount_field')), findsNothing);
       expect(find.byKey(const Key('payment_due_date_picker')), findsOneWidget);
+
+      // Confirm all unconfirmed items via filter tabs so Approve button is enabled
+      for (final filterKey in [
+        const Key('review_filter_medium'),
+        const Key('review_filter_low'),
+      ]) {
+        await tester.dragUntilVisible(
+          find.byKey(filterKey),
+          find.byType(ListView).first,
+          const Offset(0, 200),
+        );
+        await tester.tap(find.byKey(filterKey));
+        await tester.pumpAndSettle();
+        while (find.byIcon(Icons.check_rounded).evaluate().isNotEmpty) {
+          await tester.tap(find.byIcon(Icons.check_rounded).first);
+          await tester.pumpAndSettle();
+        }
+      }
+      await tester.tap(find.byKey(const Key('review_filter_all')));
+      await tester.pumpAndSettle();
+      await tester.dragUntilVisible(
+        find.byKey(const Key('payment_method_dropdown')),
+        find.byType(ListView).first,
+        const Offset(0, -250),
+      );
 
       // Approval must block without due date
       await tester.tap(find.textContaining('اعتماد ('));
@@ -1262,7 +1302,9 @@ void main() {
         300,
         scrollable: find.byType(Scrollable).first,
       );
-      await tester.tap(find.byKey(const Key('technician_dictionary_expansion')));
+      await tester.tap(
+        find.byKey(const Key('technician_dictionary_expansion')),
+      );
       await tester.pumpAndSettle();
 
       await tester.tap(find.byKey(const Key('add_alias_button')));
@@ -1297,27 +1339,24 @@ void main() {
     },
   );
 
-  test(
-    'InvoiceShareService.buildInvoicePdfFilename uses customer name and sanitizes invalid chars',
-    () {
-      final invNamed = InvoiceModel(
-        id: 'fn-1',
-        invoiceNumber: 'INV-00777',
-        customerName: '  أحمد / علي: محمود  ',
-        createdAt: DateTime(2026, 11, 25),
-      );
-      expect(
-        InvoiceShareService.buildInvoicePdfFilename(invNamed),
-        'أحمد علي محمود.pdf',
-      );
+  test('InvoiceShareService.buildInvoicePdfFilename uses customer name and sanitizes invalid chars', () {
+    final invNamed = InvoiceModel(
+      id: 'fn-1',
+      invoiceNumber: 'INV-00777',
+      customerName: '  أحمد / علي: محمود  ',
+      createdAt: DateTime(2026, 11, 25),
+    );
+    expect(
+      InvoiceShareService.buildInvoicePdfFilename(invNamed),
+      'أحمد علي محمود.pdf',
+    );
 
-      final invEmpty = invNamed.copyWith(customerName: '   ');
-      expect(
-        InvoiceShareService.buildInvoicePdfFilename(invEmpty),
-        'INV-00777.pdf',
-      );
-    },
-  );
+    final invEmpty = invNamed.copyWith(customerName: '   ');
+    expect(
+      InvoiceShareService.buildInvoicePdfFilename(invEmpty),
+      'INV-00777.pdf',
+    );
+  });
 
   testWidgets(
     'ReviewScreen item card supports direct quantity input between + and - buttons',
@@ -1396,6 +1435,492 @@ void main() {
       expect(find.text('محبس بلي نحاس'), findsOneWidget);
       expect(find.text('BR: 210 ج.م'), findsWidgets);
       expect(find.textContaining('تجاري 210'), findsNothing);
+    },
+  );
+
+  test('InvoiceModel payment due/overdue helpers distinguish today vs finished due date', () {
+    final refNow = DateTime(2026, 11, 26, 14, 0);
+    final dueTodayInv = InvoiceModel(
+      id: 'due-today-1',
+      invoiceNumber: 'INV-00111',
+      status: InvoiceStatus.approved,
+      customerName: 'حسن',
+      paymentMethod: PaymentMethod.deferredNoDeposit,
+      paymentDueDate: DateTime(2026, 11, 26),
+      createdAt: DateTime(2026, 11, 20),
+      items: const [
+        InvoiceItemModel(
+          id: 'it-dt',
+          itemName: 'ماسورة',
+          quantity: 1,
+          unitPrice: 300,
+        ),
+      ],
+    );
+
+    expect(dueTodayInv.isPaymentDueToday(refNow), isTrue);
+    expect(dueTodayInv.isPaymentOverdue(refNow), isFalse);
+    expect(dueTodayInv.overdueDays(refNow), 0);
+    expect(
+      dueTodayInv.paymentReminderBody('300 ج.م', refNow),
+      'المفروض حسن يدفع 300 ج.م النهارده',
+    );
+
+    final overdueInv = dueTodayInv.copyWith(
+      id: 'overdue-1',
+      invoiceNumber: 'INV-00112',
+      paymentDueDate: DateTime(2026, 11, 24),
+    );
+    expect(overdueInv.isPaymentDueToday(refNow), isFalse);
+    expect(overdueInv.isPaymentOverdue(refNow), isTrue);
+    expect(overdueInv.overdueDays(refNow), 2);
+    expect(
+      overdueInv.paymentReminderBody('300 ج.م', refNow),
+      'المفروض حسن كان يدفع 300 ج.م يوم 2026/11/24 (متأخر 2 يوم)',
+    );
+  });
+
+  test(
+    'SupabaseRepository.isNetworkException detects network failures accurately',
+    () {
+      expect(
+        SupabaseRepository.isNetworkException(
+          Exception('SocketException: Failed host lookup'),
+        ),
+        isTrue,
+      );
+      expect(
+        SupabaseRepository.isNetworkException(
+          Exception('ClientException: Failed to fetch'),
+        ),
+        isTrue,
+      );
+      expect(
+        SupabaseRepository.isNetworkException(TimeoutException('timed out')),
+        isTrue,
+      );
+      expect(
+        SupabaseRepository.isNetworkException(StateError('bad state')),
+        isFalse,
+      );
+      expect(
+        SupabaseRepository.isNetworkException(
+          const AppException('DB constraint error', isNetworkError: false),
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  testWidgets(
+    'Header notification bell shows unread badge, opens popover with overdue/today wording, and marks read on click',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(MainShell)),
+      );
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final twoDaysAgo = today.subtract(const Duration(days: 2));
+
+      container
+          .read(invoicesProvider.notifier)
+          .saveInvoice(
+            InvoiceModel(
+              id: 'notif-inv-today',
+              invoiceNumber: 'INV-00901',
+              status: InvoiceStatus.approved,
+              customerName: 'عميل اليوم',
+              paymentMethod: PaymentMethod.deferredNoDeposit,
+              paymentDueDate: today,
+              createdAt: now,
+              items: const [
+                InvoiceItemModel(
+                  id: 'ni-1',
+                  itemName: 'كوع',
+                  quantity: 1,
+                  unitPrice: 500,
+                ),
+              ],
+            ),
+          );
+      container
+          .read(invoicesProvider.notifier)
+          .saveInvoice(
+            InvoiceModel(
+              id: 'notif-inv-overdue',
+              invoiceNumber: 'INV-00902',
+              status: InvoiceStatus.approved,
+              customerName: 'عميل متأخر',
+              paymentMethod: PaymentMethod.deferredNoDeposit,
+              paymentDueDate: twoDaysAgo,
+              createdAt: now,
+              items: const [
+                InvoiceItemModel(
+                  id: 'ni-2',
+                  itemName: 'ماسورة',
+                  quantity: 1,
+                  unitPrice: 1000,
+                ),
+              ],
+            ),
+          );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('header_notifications_button')),
+        findsOneWidget,
+      );
+      expect(find.text('2'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('header_notifications_button')));
+      await tester.pumpAndSettle();
+
+      final popover = find.byKey(const Key('notifications_popover'));
+      expect(popover, findsOneWidget);
+      expect(
+        find.descendant(
+          of: popover,
+          matching: find.textContaining(
+            'المفروض عميل متأخر كان يدفع 1,000 ج.م يوم ${InvoiceModel.formatDisplayDate(twoDaysAgo)}',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: popover,
+          matching: find.textContaining(
+            'المفروض عميل اليوم يدفع 500 ج.م النهارده',
+          ),
+        ),
+        findsOneWidget,
+      );
+
+      // Tap overdue notification: navigates to /review and marks it read
+      await tester.tap(
+        find.byKey(const Key('notification_item_notif-inv-overdue')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('مراجعة INV-00902'), findsOneWidget);
+
+      await tester.tap(find.byType(BackButton).last);
+      await tester.pumpAndSettle();
+
+      // Only 1 unread notification remains on the badge
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('notifications_badge')),
+          matching: find.text('1'),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'Approved invoice with remaining balance shows partial/full collection actions instead of approve and updates DB state',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(MainShell)),
+      );
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final twoDaysAgo = today.subtract(const Duration(days: 2));
+
+      container
+          .read(invoicesProvider.notifier)
+          .saveInvoice(
+            InvoiceModel(
+              id: 'collect-inv-1',
+              invoiceNumber: 'INV-00950',
+              status: InvoiceStatus.approved,
+              customerName: 'عميل التحصيل',
+              paymentMethod: PaymentMethod.deferredNoDeposit,
+              paymentDueDate: twoDaysAgo,
+              createdAt: now,
+              items: const [
+                InvoiceItemModel(
+                  id: 'ci-1',
+                  itemName: 'محبس دفن',
+                  quantity: 1,
+                  unitPrice: 1000,
+                ),
+              ],
+            ),
+          );
+      await tester.pumpAndSettle();
+
+      // Open the overdue invoice from the header notifications popover
+      await tester.tap(find.byKey(const Key('header_notifications_button')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const Key('notification_item_collect-inv-1')),
+      );
+      await tester.pumpAndSettle();
+
+      // Shows collection buttons instead of quote-approval button
+      expect(
+        find.byKey(const Key('partial_collection_button')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('full_collection_button')), findsOneWidget);
+      expect(find.text('حفظ عرض سعر'), findsNothing);
+      expect(find.textContaining('اعتماد ('), findsNothing);
+
+      // Test partial collection: pay 400 now and reschedule rest
+      await tester.tap(find.byKey(const Key('partial_collection_button')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('partial_collection_dialog')),
+        findsOneWidget,
+      );
+
+      await tester.enterText(
+        find.byKey(const Key('collect_now_amount_field')),
+        '400',
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('600 ج.م'), findsWidgets);
+
+      await tester.tap(find.byKey(const Key('collect_next_due_date_picker')));
+      await tester.pumpAndSettle();
+      final pickerEl = tester.element(find.byType(DatePickerDialog));
+      final okLabel = MaterialLocalizations.of(pickerEl).okButtonLabel;
+      await tester.tap(find.text(okLabel).last);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('confirm_partial_collection_btn')));
+      await tester.pumpAndSettle();
+
+      // Close share dialog via "حفظ فقط"
+      await tester.tap(find.byKey(const Key('approved_save_only_btn')));
+      await tester.pumpAndSettle();
+
+      final afterPartial = container
+          .read(invoicesProvider)
+          .firstWhere((i) => i.id == 'collect-inv-1');
+      expect(afterPartial.effectivePaidAmount, 400);
+      expect(afterPartial.remainingAmount, 600);
+      expect(afterPartial.paymentMethod, PaymentMethod.partialNowRestLater);
+
+      // Now test full collection of remaining 600
+      await tester.tap(find.byKey(const Key('full_collection_button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('approved_save_only_btn')));
+      await tester.pumpAndSettle();
+
+      final afterFull = container
+          .read(invoicesProvider)
+          .firstWhere((i) => i.id == 'collect-inv-1');
+      expect(afterFull.paymentMethod, PaymentMethod.cash);
+      expect(afterFull.effectivePaidAmount, 1000);
+      expect(afterFull.remainingAmount, 0);
+      expect(afterFull.isPaymentDueOrOverdue, isFalse);
+    },
+  );
+
+  test('ScanService.computePipePricing divides 6m drainage pipes and 4m feeding pipes accurately', () {
+    // 1. Drainage pipe (مواسير, catalog unit عود = 6m, price 600) requested in متر => 100/m
+    final drainagePerMeter = ScanService.computePipePricing(
+      templateUnit: 'عود',
+      requestedUnit: 'متر',
+      rawOcrText: '2 متر ماسورة 4 وايتكس',
+      categoryName: 'مواسير',
+      itemName: 'ماسورة',
+      basePrice: 600,
+    );
+    expect(drainagePerMeter.unit, 'متر');
+    expect(drainagePerMeter.unitPrice, 100.0);
+
+    // 2. Feeding pipe (تغذية (بولي), catalog unit عود = 4m, price 200) requested in متر => 50/m
+    final feedingPerMeter = ScanService.computePipePricing(
+      templateUnit: 'عود',
+      requestedUnit: 'متر',
+      rawOcrText: '2 متر ماسورة بولي',
+      categoryName: 'تغذية (بولي)',
+      itemName: 'ماسورة',
+      basePrice: 200,
+    );
+    expect(feedingPerMeter.unit, 'متر');
+    expect(feedingPerMeter.unitPrice, 50.0);
+
+    // 3. Feeding pipe already priced per متر (64) stays 64 when requested in متر
+    final alreadyPerMeter = ScanService.computePipePricing(
+      templateUnit: 'متر',
+      requestedUnit: 'متر',
+      rawOcrText: '10 متر ماسورة 3/4',
+      categoryName: 'تغذية (بولي)',
+      itemName: 'ماسورة عادي PIN20',
+      basePrice: 64,
+    );
+    expect(alreadyPerMeter.unit, 'متر');
+    expect(alreadyPerMeter.unitPrice, 64.0);
+
+    // 4. Feeding pipe priced per متر (64) converted to عود (4m) => 256
+    final feedingPerStick = ScanService.computePipePricing(
+      templateUnit: 'متر',
+      requestedUnit: 'عود',
+      rawOcrText: 'عود ماسورة 3/4',
+      categoryName: 'تغذية (بولي)',
+      itemName: 'ماسورة عادي PIN20',
+      basePrice: 64,
+    );
+    expect(feedingPerStick.unit, 'عود');
+    expect(feedingPerStick.unitPrice, 256.0);
+  });
+
+  testWidgets(
+    'Editing an item in ReviewScreen opens smart same-category & similar list and applies selected item price/data',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Open Demo AI Scan -> ReviewScreen
+      await tester.tap(find.text('تسعير ورقة جديدة (AI)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('تجربة كشف تجريبي جاهز (AI Demo)'));
+      await tester.pumpAndSettle();
+
+      // Tap edit button on the first item
+      final editBtn = find.byIcon(Icons.edit_outlined).first;
+      await tester.ensureVisible(editBtn);
+      await tester.tap(editBtn);
+      await tester.pumpAndSettle();
+
+      // Tap the item name selector inside the edit dialog
+      expect(find.byKey(const Key('edit_item_name_selector')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('edit_item_name_selector')));
+      await tester.pumpAndSettle();
+
+      // Smart filter chip ("الأقرب و...") and search field are shown
+      expect(find.byKey(const Key('picker_filter_smart')), findsOneWidget);
+      expect(
+        find.byKey(const Key('smart_catalog_search_field')),
+        findsOneWidget,
+      );
+
+      // Pick a different item from the same category (e.g. محبس دفن 3/4 بوصة)
+      await tester.enterText(
+        find.byKey(const Key('smart_catalog_search_field')),
+        'محبس دفن',
+      );
+      await tester.pumpAndSettle();
+
+      final targetOption = find.textContaining('محبس دفن').first;
+      await tester.tap(targetOption);
+      await tester.pumpAndSettle();
+
+      // Verify price inside edit dialog updated to the selected item's price (> 0)
+      final priceField = tester.widget<TextField>(
+        find.byKey(const Key('edit_item_price_field')),
+      );
+      expect(double.tryParse(priceField.controller!.text) ?? 0, greaterThan(0));
+
+      // Apply changes and verify item updated on ReviewScreen
+      await tester.tap(find.byKey(const Key('edit_item_apply_btn')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('محبس دفن'), findsWidgets);
+    },
+  );
+
+  testWidgets(
+    'System back from non-home tab returns to Home, and first back on Home prompts to press again to exit',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Switch to Catalog tab
+      await tester.tap(find.text('الأصناف'));
+      await tester.pumpAndSettle();
+      expect(find.text('شجرة الأصناف والأسعار'), findsOneWidget);
+
+      // Press system back -> should return to Home tab (index 0)
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.text('تسعير ورقة جديدة (AI)'), findsOneWidget);
+
+      // Press system back once on Home -> should show double-back exit SnackBar
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.text('اضغط رجوع مرة أخرى للخروج من التطبيق'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'ReviewScreen confidence filter tabs, quick confirm checkmark, and disabled approve until all items confirmed',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: SanitaryPricingApp(enableRemoteFonts: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('تسعير ورقة جديدة (AI)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('تجربة كشف تجريبي جاهز (AI Demo)'));
+      await tester.pumpAndSettle();
+
+      // Approve button must be disabled initially because Demo scan has unconfirmed items
+      final approveBtnBefore = tester.widget<ElevatedButton>(
+        find.byKey(const Key('review_approve_button')),
+      );
+      expect(approveBtnBefore.onPressed, isNull);
+      expect(find.textContaining('يحتاج تأكيد قبل الاعتماد'), findsOneWidget);
+
+      // Filter tabs for all 3 statuses exist
+      expect(find.byKey(const Key('review_filter_all')), findsOneWidget);
+      expect(find.byKey(const Key('review_filter_high')), findsOneWidget);
+      expect(find.byKey(const Key('review_filter_medium')), findsOneWidget);
+      expect(find.byKey(const Key('review_filter_low')), findsOneWidget);
+
+      // Switch to medium filter, confirm item via checkmark
+      await tester.ensureVisible(find.byKey(const Key('review_filter_medium')));
+      await tester.tap(find.byKey(const Key('review_filter_medium')));
+      await tester.pumpAndSettle();
+      while (find.byIcon(Icons.check_rounded).evaluate().isNotEmpty) {
+        await tester.tap(find.byIcon(Icons.check_rounded).first);
+        await tester.pumpAndSettle();
+      }
+
+      // Switch to low filter, confirm item via checkmark
+      await tester.tap(find.byKey(const Key('review_filter_low')));
+      await tester.pumpAndSettle();
+      while (find.byIcon(Icons.check_rounded).evaluate().isNotEmpty) {
+        await tester.tap(find.byIcon(Icons.check_rounded).first);
+        await tester.pumpAndSettle();
+      }
+
+      // Now all items are confirmed -> Approve button must be enabled!
+      final approveBtnAfter = tester.widget<ElevatedButton>(
+        find.byKey(const Key('review_approve_button')),
+      );
+      expect(approveBtnAfter.onPressed, isNotNull);
+      expect(find.textContaining('يحتاج تأكيد قبل الاعتماد'), findsNothing);
     },
   );
 }

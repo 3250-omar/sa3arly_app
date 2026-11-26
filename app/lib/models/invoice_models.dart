@@ -272,17 +272,71 @@ class InvoiceModel {
   double get remainingAmount =>
       (total - effectivePaidAmount).clamp(0.0, double.infinity);
 
-  bool get isPaymentDueOrOverdue {
+  bool isPaymentDueToday([DateTime? now]) {
     if (status != InvoiceStatus.approved) return false;
     if (paymentDueDate == null || remainingAmount <= 0) return false;
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
+    final ref = now ?? DateTime.now();
+    final today = DateTime(ref.year, ref.month, ref.day);
     final due = DateTime(
       paymentDueDate!.year,
       paymentDueDate!.month,
       paymentDueDate!.day,
     );
-    return !due.isAfter(today);
+    return due == today;
+  }
+
+  bool isPaymentOverdue([DateTime? now]) {
+    if (status != InvoiceStatus.approved) return false;
+    if (paymentDueDate == null || remainingAmount <= 0) return false;
+    final ref = now ?? DateTime.now();
+    final today = DateTime(ref.year, ref.month, ref.day);
+    final due = DateTime(
+      paymentDueDate!.year,
+      paymentDueDate!.month,
+      paymentDueDate!.day,
+    );
+    return due.isBefore(today);
+  }
+
+  int overdueDays([DateTime? now]) {
+    if (!isPaymentOverdue(now)) return 0;
+    final ref = now ?? DateTime.now();
+    final today = DateTime(ref.year, ref.month, ref.day);
+    final due = DateTime(
+      paymentDueDate!.year,
+      paymentDueDate!.month,
+      paymentDueDate!.day,
+    );
+    return today.difference(due).inDays;
+  }
+
+  bool get isPaymentDueOrOverdue => isPaymentDueToday() || isPaymentOverdue();
+
+  static String formatDisplayDate(DateTime d) {
+    final y = d.year.toString().padLeft(4, '0');
+    final m = d.month.toString().padLeft(2, '0');
+    final day = d.day.toString().padLeft(2, '0');
+    return '$y/$m/$day';
+  }
+
+  String paymentReminderTitle([DateTime? now]) {
+    if (isPaymentOverdue(now)) {
+      return 'موعد تحصيل فائت — فاتورة $invoiceNumber';
+    }
+    return 'موعد تحصيل اليوم — فاتورة $invoiceNumber';
+  }
+
+  String paymentReminderBody(String formattedAmount, [DateTime? now]) {
+    final customer = customerName.trim().isEmpty
+        ? 'العميل'
+        : customerName.trim();
+    if (isPaymentOverdue(now) && paymentDueDate != null) {
+      final days = overdueDays(now);
+      final base =
+          'المفروض $customer كان يدفع $formattedAmount يوم ${formatDisplayDate(paymentDueDate!)}';
+      return days >= 1 ? '$base (متأخر $days يوم)' : base;
+    }
+    return 'المفروض $customer يدفع $formattedAmount النهارده';
   }
 
   List<String> get distinctBrandNames {

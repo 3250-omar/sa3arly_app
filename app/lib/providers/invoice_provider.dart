@@ -77,9 +77,12 @@ final invoicesSyncProvider =
 
 class InvoicesNotifier extends Notifier<List<InvoiceModel>> {
   static const _uuid = Uuid();
+  bool _disposed = false;
 
   @override
   List<InvoiceModel> build() {
+    _disposed = false;
+    ref.onDispose(() => _disposed = true);
     final auth = ref.watch(authProvider);
     Future.microtask(() => _bootstrap(auth));
     return AppConfig.isDemoMode ? DemoCatalogData.initialInvoices() : const [];
@@ -87,47 +90,97 @@ class InvoicesNotifier extends Notifier<List<InvoiceModel>> {
 
   Future<void> _bootstrap(AuthState auth) async {
     final cached = await LocalCacheService.loadInvoices();
+    if (_disposed) return;
     if (cached != null && cached.isNotEmpty) {
       state = cached;
     }
 
-    if (!AppConfig.isDemoMode && auth.isAuthenticated) {
+    if (!AppConfig.isDemoMode && auth.isAuthenticated && !auth.isLoading) {
       await syncFromSupabase();
     }
   }
 
   Future<void> syncFromSupabase() async {
-    if (AppConfig.isDemoMode) return;
+    if (AppConfig.isDemoMode || _disposed) return;
     final syncCtrl = ref.read(invoicesSyncProvider.notifier);
     syncCtrl.setSyncing(true);
     final repo = SupabaseRepository();
 
     try {
-      // 1. Push pending offline invoices first
+      // 1. Push pending offline invoices individually so one bad record doesn't block all syncs
       final pendingIds = await LocalCacheService.loadPendingInvoiceIds();
+      var hadNetworkError = false;
       for (final id in pendingIds) {
         final localInv = state.where((inv) => inv.id == id).firstOrNull;
-        if (localInv != null) {
-          await repo.upsertInvoice(localInv);
+        if (localInv == null) {
+          await syncCtrl.clearPending(id);
+          continue;
         }
-        await syncCtrl.clearPending(id);
+        try {
+          await repo.upsertInvoice(localInv);
+          await syncCtrl.clearPending(id);
+        } catch (e) {
+          final isNet =
+              (e is AppException && e.isNetworkError) ||
+              SupabaseRepository.isNetworkException(e);
+          if (isNet) {
+            hadNetworkError = true;
+            break;
+          }
+          // Non-network DB error: leave or let fetch reconcile without falsely flagging Offline
+        }
+      }
+
+      if (hadNetworkError) {
+        syncCtrl.setOffline(true);
+        return;
       }
 
       // 2. Pull fresh invoices from Supabase
       final remote = await repo.fetchInvoices();
+      if (_disposed) return;
       state = remote;
       await LocalCacheService.saveInvoices(remote);
+
+      // Reconcile any pending IDs that are already present in remote or absent locally
+      final remoteIds = {for (final r in remote) r.id};
+      final remainingPending = await LocalCacheService.loadPendingInvoiceIds();
+      for (final id in remainingPending) {
+        if (remoteIds.contains(id) || !state.any((inv) => inv.id == id)) {
+          await syncCtrl.clearPending(id);
+        }
+      }
+
       unawaited(PaymentReminderService.syncAll(remote));
       syncCtrl.setOffline(false);
-    } catch (_) {
-      syncCtrl.setOffline(true);
+    } catch (e) {
+      if (_disposed) return;
+      final isNet =
+          (e is AppException && e.isNetworkError) ||
+          SupabaseRepository.isNetworkException(e);
+      if (isNet) {
+        syncCtrl.setOffline(true);
+      }
     } finally {
-      syncCtrl.setSyncing(false);
+      if (!_disposed) {
+        syncCtrl.setSyncing(false);
+      }
     }
   }
 
   String generateNextInvoiceNumber({int offset = 1}) {
-    final nextNum = state.length + offset;
+    var maxNum = state.length;
+    final regex = RegExp(r'^INV-(\d+)$');
+    for (final inv in state) {
+      final match = regex.firstMatch(inv.invoiceNumber.trim());
+      if (match != null) {
+        final numVal = int.tryParse(match.group(1)!) ?? 0;
+        if (numVal > maxNum) {
+          maxNum = numVal;
+        }
+      }
+    }
+    final nextNum = maxNum + offset;
     return 'INV-${nextNum.toString().padLeft(5, '0')}';
   }
 
@@ -155,9 +208,14 @@ class InvoicesNotifier extends Notifier<List<InvoiceModel>> {
       await SupabaseRepository().upsertInvoice(invoice);
       await syncCtrl.clearPending(invoice.id);
       syncCtrl.setOffline(false);
-    } catch (_) {
-      await syncCtrl.markPending(invoice.id);
-      syncCtrl.setOffline(true);
+    } catch (e) {
+      final isNet =
+          (e is AppException && e.isNetworkError) ||
+          SupabaseRepository.isNetworkException(e);
+      if (isNet) {
+        await syncCtrl.markPending(invoice.id);
+        syncCtrl.setOffline(true);
+      }
     }
   }
 

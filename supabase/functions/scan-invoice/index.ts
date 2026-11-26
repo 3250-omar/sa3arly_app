@@ -6,16 +6,10 @@ declare const Deno: {
 const MAX_IMAGES = 5;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-const GITHUB_WAVE_1 = ["openai/gpt-4.1-mini"];
-const GITHUB_WAVE_2 = ["openai/gpt-4o-mini"];
-const OPENROUTER_WAVE_1 = [
-  "openrouter/free",
-  "nvidia/nemotron-3.5-super-vl:free",
-];
-const OPENROUTER_WAVE_2 = [
-  "google/gemma-4-31b-it:free",
-  "google/gemma-4-26b-a4b-it:free",
-];
+const GEMINI_PRIMARY_MODEL = "gemini-3.8-flash";
+const GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite";
+const OPENROUTER_FALLBACK_MODEL = "google/gemma-4-31b-it:free";
+const GITHUB_FALLBACK_MODEL = "openai/gpt-4.1-mini";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -35,7 +29,22 @@ interface TemplateRow {
   name: string;
   size: string | null;
   unit: string | null;
+  categories?: { name?: string } | null;
 }
+
+const SPECIALIZED_QUALIFIERS = [
+  "مقاوم",
+  "اسود",
+  "مجلفن",
+  "بالباب",
+  "مسلوب",
+  "لاكور",
+  "اختبار",
+  "تسليك",
+  "بصاموله",
+  "بدون صاموله",
+  "pin16",
+];
 
 interface AliasRow {
   alias_text: string;
@@ -104,12 +113,12 @@ function normalizeAr(value: string): string {
     .replace(/ى/g, "ي")
     .replace(/ة/g, "ه")
     .replace(/[\u064B-\u065F\u0670]/g, "")
-    .replace(/\brak\b/g, "راك")
-    .replace(/راكثيرم/g, "راك ثيرم")
+    .replace(/\brak\b|راك\s*(?:ثيرم|تيرم|بيرم|ثرم|ترم)?|راكثيرم/g, "راك")
     .replace(/اكواثيرم|اكوا\s*ثيرم|aquatherm/g, "اكواثيرم")
     .replace(/بي\s*ار|بى\s*ار/g, "br")
     .replace(/(?:^|\s)(?:تيه|تي|ت|مشترك|قسام)(?=\s|$)/g, " t ")
     .replace(/\b(?:واى|مشطوف)\b/g, "واي")
+    .replace(/\b(?:معزول|معزوله|للشمس|فايبر)\b/g, "ماسوره مقاوم")
     .replace(/كوع\s*(?:مفتوح|45)/g, "كوع فاتح")
     .replace(/كوع\s*(?:قفل|مقفول)/g, "كوع عادي")
     .replace(/كوع\s*(?:ب?باب|كشف|تسليك)/g, "كوع بالباب")
@@ -149,6 +158,7 @@ function normalizeSize(value: string | null | undefined): string {
   let s = toWesternDigits(value)
     .toLowerCase()
     .replace(/\([^)]*\)/g, " ")
+    .replace(/-\s*سمك\s*[\d.]+\s*(?:مم|mm)?/g, " ")
     .replace(/[أإآ]/g, "ا")
     .replace(/ى/g, "ي")
     .replace(/ة/g, "ه")
@@ -161,15 +171,19 @@ function normalizeSize(value: string | null | undefined): string {
       " 3/4 ",
     )
     .replace(/نص\s*بوصه|نصف\s*بوصه|\bنص\b|20\s*(?:مم|mm)?/g, " 1/2 ")
+    .replace(/160\s*(?:مم|mm)?/g, " 6 ")
+    .replace(/110\s*(?:مم|mm)?/g, " 4 ")
+    .replace(/(?:75|90)\s*(?:مم|mm)?/g, " 3 ")
     .replace(/63\s*(?:مم|mm)?/g, " 2 ")
     .replace(/50\s*(?:مم|mm)?/g, " 1.5 ")
     .replace(/40\s*(?:مم|mm)?/g, " 1.25 ")
     .replace(/32\s*(?:مم|mm)?/g, " 1 ")
-    .replace(/×|\*|\bفي\b/g, " x ")
+    .replace(/×|\*|\bفي\b|\bعلى\b|\bعلي\b/g, " x ")
+    .replace(/[~ٓ″]/g, " ")
     .replace(/بوصه|بوصة|inch|in|"|''/g, " ");
 
   const compound = s.match(
-    /(1\/2|3\/4|1\.5|1\.25|1|2)\s*x\s*(1\/2|3\/4|1\.5|1\.25|1|2)/,
+    /(1\/2|3\/4|1\.5|1\.25|1|2|3|4|6)\s*(?:x|\/)\s*(1\/2|3\/4|1\.5|1\.25|1|2|3|4|6)/,
   );
   if (compound) {
     const parts = [compound[1], compound[2]].sort(
@@ -178,7 +192,7 @@ function normalizeSize(value: string | null | undefined): string {
     return `${parts[0]}x${parts[1]}`;
   }
 
-  const single = s.match(/(?:^|\s)(1\/2|3\/4|1\.5|1\.25|1|2)(?=\s|$)/);
+  const single = s.match(/(?:^|\s)(1\/2|3\/4|1\.5|1\.25|1|2|3|4|6)(?=\s|$)/);
   if (single) return single[1];
   if (/\bبوصه\b|\bبوصة\b/.test(value)) return "1";
   return "";
@@ -212,6 +226,31 @@ function matchBrandFromText(
     }
   }
   return bestId;
+}
+
+function cleanNullableText(raw: unknown): string {
+  if (raw === null || raw === undefined) return "";
+  const trimmed = String(raw).trim();
+  const lower = trimmed.toLowerCase();
+  if (
+    !trimmed ||
+    lower === "null" ||
+    lower === "undefined" ||
+    lower === "n/a"
+  ) {
+    return "";
+  }
+  return trimmed;
+}
+
+function extractLeadingQuantity(rawOcr: string): number | null {
+  const normalized = toWesternDigits(rawOcr).trim();
+  const m = normalized.match(
+    /^\s*(\d+(?:\.\d+)?)(?!\s*\/)(?=\s*(?:[x×*]|قطعه|قطعة|متر|عود|حبه|حبة|عدد|\s+[^\d\s.]))/iu,
+  );
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 function parseQuantity(raw: unknown): number {
@@ -432,7 +471,89 @@ async function attemptOpenAiCompatible(
   return { parsed, modelUsed: model };
 }
 
-async function raceAttempts(
+async function attemptGemini(
+  apiKey: string,
+  model: string,
+  prompt: string,
+  ctx: string,
+  imgs: Array<{ data: string; mime: string }>,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<WaveResult> {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const headers = {
+    "Content-Type": "application/json",
+    "x-goog-api-key": apiKey,
+  };
+  const baseBody = {
+    systemInstruction: { parts: [{ text: prompt }] },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            text: "كتالوج المحل:\n" + ctx + "\n\nاقرأ الصور واستخرج البنود:",
+          },
+          ...imgs.map((img) => ({
+            inlineData: { mimeType: img.mime, data: img.data },
+          })),
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 4096,
+      responseMimeType: "application/json",
+    },
+  };
+
+  const sendAttempt = async (bodyObj: unknown, reqTimeoutMs: number) =>
+    await fetchJsonWithTimeout(
+      endpoint,
+      { method: "POST", headers, body: JSON.stringify(bodyObj) },
+      reqTimeoutMs,
+      signal,
+    );
+
+  const preferredPayload = {
+    ...baseBody,
+    generationConfig: {
+      ...baseBody.generationConfig,
+      mediaResolution: "MEDIA_RESOLUTION_HIGH",
+      thinkingConfig: { thinkingLevel: "low" },
+    },
+  };
+
+  let res = await sendAttempt(preferredPayload, timeoutMs);
+  if (res.status === 400) {
+    res = await sendAttempt(baseBody, Math.min(timeoutMs, 15000));
+  }
+  if (!res.ok) {
+    const msg = extractErrMsg(res.body, res.status);
+    console.error(`Gemini error on ${model}: ${res.status} ${msg}`);
+    throw Object.assign(new Error(msg), { status: res.status });
+  }
+  const data = res.body as {
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+    }>;
+  };
+  const txt = (data?.candidates?.[0]?.content?.parts ?? [])
+    .filter((p) => !p.thought && typeof p.text === "string")
+    .map((p) => p.text!)
+    .join("")
+    .trim();
+  if (!txt) {
+    throw Object.assign(new Error("Empty Gemini response"), { status: 502 });
+  }
+  const parsed = parseAiJson(txt);
+  if (!parsed) {
+    throw Object.assign(new Error("Malformed Gemini JSON"), { status: 502 });
+  }
+  return { parsed, modelUsed: `google/${model}` };
+}
+
+async function runSequentialAttempts(
   factories: Array<(signal: AbortSignal) => Promise<WaveResult>>,
 ): Promise<{
   winner: WaveResult | null;
@@ -446,30 +567,25 @@ async function raceAttempts(
       lastDetail: "No models configured",
     };
   }
-  const ctrl = new AbortController();
   let lastStatus = 503;
   let lastDetail = "AI service temporarily busy";
 
-  try {
-    const winner = await Promise.any(
-      factories.map((fn) =>
-        fn(ctrl.signal).catch((err) => {
-          if (err && typeof err === "object") {
-            const st = (err as { status?: unknown }).status;
-            const msg = (err as { message?: unknown }).message;
-            if (typeof st === "number") lastStatus = st;
-            if (typeof msg === "string" && msg.length > 0) lastDetail = msg;
-          }
-          throw err;
-        }),
-      ),
-    );
-    ctrl.abort();
-    return { winner, lastStatus: 200, lastDetail: "" };
-  } catch {
-    ctrl.abort();
-    return { winner: null, lastStatus, lastDetail };
+  for (const fn of factories) {
+    const ctrl = new AbortController();
+    try {
+      const winner = await fn(ctrl.signal);
+      return { winner, lastStatus: 200, lastDetail: "" };
+    } catch (err) {
+      if (err && typeof err === "object") {
+        const st = (err as { status?: unknown }).status;
+        const msg = (err as { message?: unknown }).message;
+        if (typeof st === "number") lastStatus = st;
+        if (typeof msg === "string" && msg.length > 0) lastDetail = msg;
+      }
+    }
   }
+
+  return { winner: null, lastStatus, lastDetail };
 }
 
 function buildCompactCatalog(
@@ -529,18 +645,18 @@ function buildCompactCatalog(
   }
 
   if (aliases.length > 0) {
-    // Keep prompt compact by including up to 20 sample aliases; deterministic aliasMap still checks all rows.
+    // Include all known plumber slang aliases (up to 500) so the AI sees exact domain vocabulary.
     const pairs: string[] = [];
     for (const a of aliases) {
       const tid = templateIdToIdx.get(a.item_template_id);
       const cleanedAlias = stripLeadingQty(a.alias_text);
       if (tid && cleanedAlias) {
         pairs.push(`${cleanedAlias}=>${tid}`);
-        if (pairs.length >= 20) break;
+        if (pairs.length >= 500) break;
       }
     }
     if (pairs.length > 0) {
-      ctxLines.push("أمثلة مسميات (alias=>tid):");
+      ctxLines.push("قاموس مسميات السباكين (alias=>tid):");
       for (let i = 0; i < pairs.length; i += 10) {
         ctxLines.push(pairs.slice(i, i + 10).join(" | "));
       }
@@ -595,9 +711,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const sbUrl = Deno.env.get("SUPABASE_URL");
   const sbKey = Deno.env.get("SUPABASE_ANON_KEY");
+  const geminiKey =
+    Deno.env.get("GEMINI_API_KEY") ??
+    Deno.env.get("GOOGLE_API_KEY") ??
+    Deno.env.get("GOOGLE_GEMINI_API_KEY");
   const githubToken = Deno.env.get("GITHUB_TOKEN");
   const openRouterKey = Deno.env.get("OPENROUTER_API_KEY");
-  if (!sbUrl || !sbKey || (!githubToken && !openRouterKey)) {
+  if (!sbUrl || !sbKey || (!geminiKey && !githubToken && !openRouterKey)) {
     console.error("Missing required env vars");
     return jsonRes(500, { error: "Server configuration error" }, origin);
   }
@@ -615,7 +735,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       headers: { apikey: sbKey, Authorization: "Bearer " + token },
     }),
     sbGet(
-      sbUrl + "/rest/v1/item_templates?select=id,name,size,unit&order=name.asc",
+      sbUrl +
+        "/rest/v1/item_templates?select=id,name,size,unit,categories(name)&order=name.asc",
       sbKey,
       token,
     ),
@@ -709,118 +830,97 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
   const prompt = [
     "أنت خبير تسعير أدوات صحية وسباكة في مصر.",
-    "اقرأ الورقة المكتوبة بخط اليد في الصور المرفقة وطابق كل بند بدقة مع الكتالوج المرفق باستخدام الأرقام المختصرة (tid للصنف، bid للماركة).",
-    "قواعد الماركة:",
-    "- اقرأ اسم الشركة من رأس الورقة أو بجانب البنود (راك/RAK/راكثيرم => راك، أكواثيرم => أكواثيرم، الشريف => الشريف، BR/بي ار => BR).",
+    "اقرأ كل سطر في الورقة المكتوبة بخط اليد من أعلى لأسفل دون تخطي أي سطر ودون اختراع بنود غير مكتوبة، وطابق كل بند بدقة مع الكتالوج المرفق باستخدام الأرقام المختصرة (tid للصنف، bid للماركة).",
+    "قواعد القراءة والكميات والأرقام:",
+    "- الأرقام العربية الشرقية (٠ ١ ٢ ٣ ٤ ٥ ٦ ٧ ٨ ٩) لها الأولوية المطلقة في القراءة (ميز بدقة بين ٥ و٠، و٢ و٣ و٤ و٦ و٧ و٨) ثم حوّلها في الـ JSON إلى 0-9.",
+    "- العلامة (~) أو (ٓ) فوق الرقم أو بجانبه تعني «بوصة» (مثال: ٢~ = 2 بوصة، ٤~ = 4 بوصة، ٣/٤~ = 3/4 بوصة).",
+    "- استخرج العدد/الكمية بدقة سواء كُتب قبل الصنف أو بعده، ولا تخلط أبداً بين أرقام المقاس (1/2، 3/4، 1، 1.5، 2، 3، 4، 6) وبين الكمية.",
+    '- استفد أولاً من «قاموس مسميات السباكين (alias=>tid)» المرفق لمطابقة مصطلحات الفنيين؛ وإذا تعذّر إيجاد البند في الكتالوج، ضع tid: null واكتب اسم الصنف المقروء بالعربي ولا تكتب أبداً كلمة "null" كنص داخل item_name أو size.',
+    "قاعدة اختيار الصنف العادي (مهم جداً):",
+    "- إذا لم يُذكر صراحةً في السطر وصف مميّز مثل (مقاوم، معزول، أسود، مجلفن، بالباب، مسلوب، لاكور، بصامولة، اختبار، تسليك، PIN16)، اختر الصنف «العادي» المطابق فقط (مثل ماسورة عادي PIN20، كوع لحام، T لحام، جلبة لحام، طبة لحام) ولا تخترع أو تختار أي صنف مخصص لم يُذكر في الورقة.",
+    "قواعد الوحدات للمواسير:",
+    "- احتفظ بالوحدة المكتوبة في الورقة في حقل requested_unit و unit: إذا كتب 'متر' (مثل: 2 متر ماسورة 4 وايتكس أو 10 متر ماسورة 3/4) ضع requested_unit: 'متر'، وإذا كتب 'عود' أو لم يذكر 'متر' مع ماسورة صرف/عود ضع requested_unit: 'عود'، وللقطع ضع 'قطعة'.",
+    "قواعد الماركة وعلامات التكرار والثنائيات:",
+    "- لو ذُكرت شركة واحدة في أول الصفحة أو في أول سطر بدون ذكر شركات أخرى في الأسطر التالية، فهي تنطبق على باقي بنود نفس النوع.",
+    "- علامات التكرار مثل (\" \") أو (//) أو (،،) أو ('') معناها نفس الشركة المكتوبة في السطر السابق.",
+    "- مراعاة الثنائيات المعتادة ما لم يُذكر خلاف ذلك صراحة: بنود التغذية/البولي للشركات مثل 'راك' يكون الصرف والمواسير المقابل لها في الغالب 'وايتكس' (مثلاً لو الكشف بدأ بـ راك ثم ظهرت بنود صرف/مواسير صرف بدون شركة فهي وايتكس، والعكس لو وايتكس وظهرت بنود بولي/تغذية فهي راك).",
     "- ممنوع اختيار 'شعبي' إلا إذا كُتبت كلمة 'شعبي' أو 'اقتصادي' صراحة في الورقة، وإلا ضع bid: null.",
     "قواعد المقاسات والسباكة المصرية:",
-    "- 'نص' أو '1/2' أو '20مم' => '1/2 بوصة' | 'تلات ارباع' أو '3/4' أو '25مم' => '3/4 بوصة' | '1' أو 'بوصة' أو '32مم' => '1 بوصة' | 'بوصة ونص' أو '1.5' أو '50مم' => '1.5 بوصة' | '2' أو '63مم' => '2 بوصة'.",
-    "- مصطلحات السباكين: بيبة=بلاعة، مشترك/قسام=T، مشطوف=واي، كوع مفتوح/45=كوع فاتح، كوع قفل=كوع عادي، كوع باب/كشف=كوع بالباب، عداية/مطب=كرنك، طربوش=هواية، سدة=طبة، كليبس=قفيز، يونيون=لاكور، بوش/رديوسر=نقاص، نتاية=داخلي، دكر=ذكر.",
-    "- فرّق بدقة بين: كوع، تيه (T)، جلبة، لاكور، طبة، نقاص، ماسورة، سن داخلي، سن ذكر، قفيز، صليبة، كرنك، ولا تخترع أصنافاً غير مكتوبة.",
+    "- التغذية: 'نص'/'1/2'/'20مم' => '1/2 بوصة' | 'تلات ارباع'/'3/4'/'25مم' => '3/4 بوصة' | '1'/'بوصة'/'32مم' => '1 بوصة' | 'بوصة ونص'/'1.5'/'50مم' => '1.5 بوصة' | '2'/'63مم' => '2 بوصة'.",
+    "- الصرف والمواسير: '1.5 بوصة'، '2 بوصة'، '3 بوصة'، '4 بوصة'، '6 بوصة' (لا يوجد مقاس 3/2 بوصة؛ تحقق هل يقصد 3/4 أو 1/2 أو 1.5 بوصة).",
+    "- مصطلحات السباكين: معزول / شمس / فايبر = ماسورة مقاوم، ماسورة عادية / بولي بدون ذكر معزول = ماسورة عادي PIN20، بيبة=بلاعة، مشترك/قسام=T، مشطوف=واي، كوع مفتوح/45=كوع فاتح، كوع قفل=كوع عادي، كوع باب/كشف=كوع بالباب، عداية/مطب=كرنك، طربوش=هواية، سدة=طبة، كليبس=قفيز، يونيون=لاكور، بوش/رديوسر=نقاص، نتاية=داخلي، دكر=ذكر.",
     "أعد JSON فقط بدون أي نص إضافي:",
-    '{"detected_brand_text":"نص الشركة أو null","bid":1,"items":[{"raw_ocr_text":"النص الأصلي","tid":12,"bid":1,"item_name":"اسم الصنف","size":"المقاس أو null","unit":"قطعة أو متر أو عود","quantity":1,"confidence":"high أو medium أو low","notes":"ملاحظة أو null"}]}',
+    '{"detected_brand_text":"نص الشركة أو null","bid":1,"items":[{"raw_ocr_text":"النص الأصلي للسطر","tid":12,"bid":1,"item_name":"اسم الصنف العربي","size":"المقاس أو null","unit":"قطعة أو متر أو عود","requested_unit":"متر أو عود أو قطعة","quantity":1,"confidence":"high أو medium أو low","notes":"ملاحظة أو null"}]}',
     "الثقة: high عند تطابق الصنف والمقاس والكمية تماماً، medium عند الحاجة لتأكيد ماركة أو مقاس، low إذا كان غير واضح أو غير موجود بالكتالوج.",
   ].join("\n");
 
-  let winner: WaveResult | null = null;
-  let lastStatus = 503;
-  let lastDetail = "AI service temporarily busy";
-
-  // Wave 1: Parallel fast free race — GitHub gpt-4.1-mini + OpenRouter auto router / Nemotron (15s strict end-to-end)
-  const wave1Factories: Array<(s: AbortSignal) => Promise<WaveResult>> = [];
-  if (githubToken) {
-    for (const m of GITHUB_WAVE_1) {
-      wave1Factories.push((sig) =>
-        attemptOpenAiCompatible(
-          "GitHub",
-          "https://models.github.ai/inference/chat/completions",
-          githubToken,
-          m,
-          prompt,
-          catalog.ctx,
-          imgs,
-          15000,
-          sig,
-          { includeDetailHigh: true },
-        ),
-      );
-    }
+  // Strict sequential 1-request-at-a-time execution:
+  // 1. Gemini 3.8 Flash (primary — 1 request in normal cases)
+  // 2. Gemini 3.5 Flash Lite (fallback 1 — only if primary fails)
+  // 3. OpenRouter Gemma 4 31B -> GitHub GPT-4.1-mini (fallback 2 — only if Gemini fails or key is absent)
+  const attempts: Array<(sig: AbortSignal) => Promise<WaveResult>> = [];
+  if (geminiKey) {
+    attempts.push((sig) =>
+      attemptGemini(
+        geminiKey,
+        GEMINI_PRIMARY_MODEL,
+        prompt,
+        catalog.ctx,
+        imgs,
+        22000,
+        sig,
+      ),
+    );
+    attempts.push((sig) =>
+      attemptGemini(
+        geminiKey,
+        GEMINI_FALLBACK_MODEL,
+        prompt,
+        catalog.ctx,
+        imgs,
+        18000,
+        sig,
+      ),
+    );
   }
   if (openRouterKey) {
-    for (const m of OPENROUTER_WAVE_1) {
-      wave1Factories.push((sig) =>
-        attemptOpenAiCompatible(
-          "OpenRouter",
-          "https://openrouter.ai/api/v1/chat/completions",
-          openRouterKey,
-          m,
-          prompt,
-          catalog.ctx,
-          imgs,
-          15000,
-          sig,
-          {
-            extraBody: { reasoning: { enabled: false } },
-            extraHeaders: { "X-Title": "Saarly" },
-          },
-        ),
-      );
-    }
+    attempts.push((sig) =>
+      attemptOpenAiCompatible(
+        "OpenRouter",
+        "https://openrouter.ai/api/v1/chat/completions",
+        openRouterKey,
+        OPENROUTER_FALLBACK_MODEL,
+        prompt,
+        catalog.ctx,
+        imgs,
+        18000,
+        sig,
+        {
+          extraBody: { reasoning: { enabled: false } },
+          extraHeaders: { "X-Title": "Saarly" },
+        },
+      ),
+    );
   }
-  const w1 = await raceAttempts(wave1Factories);
-  winner = w1.winner;
-  lastStatus = w1.lastStatus;
-  lastDetail = w1.lastDetail;
+  if (githubToken) {
+    attempts.push((sig) =>
+      attemptOpenAiCompatible(
+        "GitHub",
+        "https://models.github.ai/inference/chat/completions",
+        githubToken,
+        GITHUB_FALLBACK_MODEL,
+        prompt,
+        catalog.ctx,
+        imgs,
+        15000,
+        sig,
+        { includeDetailHigh: true },
+      ),
+    );
+  }
 
-  // Wave 2: Parallel free fallback — GitHub gpt-4o-mini + OpenRouter Gemma 4 (15s strict end-to-end)
-  if (!winner) {
-    const wave2Factories: Array<(s: AbortSignal) => Promise<WaveResult>> = [];
-    if (githubToken) {
-      for (const m of GITHUB_WAVE_2) {
-        wave2Factories.push((sig) =>
-          attemptOpenAiCompatible(
-            "GitHub",
-            "https://models.github.ai/inference/chat/completions",
-            githubToken,
-            m,
-            prompt,
-            catalog.ctx,
-            imgs,
-            15000,
-            sig,
-            { includeDetailHigh: true },
-          ),
-        );
-      }
-    }
-    if (openRouterKey) {
-      for (const m of OPENROUTER_WAVE_2) {
-        wave2Factories.push((sig) =>
-          attemptOpenAiCompatible(
-            "OpenRouter",
-            "https://openrouter.ai/api/v1/chat/completions",
-            openRouterKey,
-            m,
-            prompt,
-            catalog.ctx,
-            imgs,
-            15000,
-            sig,
-            {
-              extraBody: { reasoning: { enabled: false } },
-              extraHeaders: { "X-Title": "Saarly" },
-            },
-          ),
-        );
-      }
-    }
-    const w2 = await raceAttempts(wave2Factories);
-    winner = w2.winner;
-    if (!winner) {
-      lastStatus = w2.lastStatus;
-      lastDetail = w2.lastDetail;
-    }
-  }
+  const { winner, lastStatus, lastDetail } =
+    await runSequentialAttempts(attempts);
 
   if (!winner) {
     return jsonRes(
@@ -882,6 +982,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
   }
 
+  const rakBrandId =
+    brands.find((b) => normalizeAr(b.name) === "راك")?.id ?? null;
+  const whitexBrandId =
+    brands.find((b) => normalizeAr(b.name) === "وايتكس")?.id ?? null;
+  const templateCategoryMap = new Map<string, string>();
+  for (const t of templates) {
+    const catName = t.categories?.name ? String(t.categories.name) : "";
+    if (catName) templateCategoryMap.set(t.id, catName);
+  }
+
   const templateMeta = templates.map((t) => ({
     template: t,
     normName: normalizeAr(t.name),
@@ -889,13 +999,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
       .split(" ")
       .filter((w) => w.length > 0),
     normSize: normalizeSize(t.size),
+    normCategory: normalizeAr(t.categories?.name ?? ""),
   }));
   const templateUuidSet = new Set(templates.map((t) => t.id));
 
   const items = rawItems.map((it) => {
-    const rawOcr = String(it.raw_ocr_text ?? "").trim();
-    const rawName = String(it.item_name ?? "").trim();
-    const rawSize = it.size ? String(it.size).trim() : "";
+    const rawOcr = cleanNullableText(it.raw_ocr_text);
+    const rawName = cleanNullableText(it.item_name);
+    const rawSize = cleanNullableText(it.size);
+    const cleanUnit = cleanNullableText(it.unit);
+    const rawRequestedUnit = cleanNullableText(it.requested_unit);
+    const cleanNotes = cleanNullableText(it.notes);
 
     // 1. Resolve Brand
     const matchedItemBrand = matchBrandFromText(rawOcr, brands);
@@ -912,7 +1026,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
     itemBrandId = itemBrandId ?? detectedBrandId ?? preferredBrandId;
 
-    // 2. Resolve ItemTemplate (AI ID -> Alias -> Size verification -> Fuzzy fallback)
+    // 2. Resolve ItemTemplate (AI ID -> Alias -> Qualifier/Size verification -> Fuzzy fallback)
     let templateId =
       resolveIntOrUuid(it.tid, catalog.idxToTemplateId, templateUuidSet) ??
       resolveIntOrUuid(
@@ -928,10 +1042,55 @@ Deno.serve(async (req: Request): Promise<Response> => {
       templateId = matchedAliasId;
     }
 
+    const queryNormAll = normalizeAr(`${rawOcr} ${rawName}`);
     const extractedSize =
       normalizeSize(rawSize) ||
       normalizeSize(strippedRaw) ||
       normalizeSize(rawName);
+
+    // Rule 3: Never pick a specialized qualifier (مقاوم, أسود, بالباب, PIN16, etc.) if not mentioned in OCR
+    if (templateId) {
+      const chosen = catalog.templateById.get(templateId);
+      if (chosen) {
+        const chosenNorm = normalizeAr(chosen.name);
+        const hasUnmentionedQualifier = SPECIALIZED_QUALIFIERS.some(
+          (q) => chosenNorm.includes(q) && !queryNormAll.includes(q),
+        );
+        if (hasUnmentionedQualifier) {
+          const targetSize = extractedSize || normalizeSize(chosen.size);
+          let bestPlainId: string | null = null;
+          let bestPlainScore = 0;
+          for (const meta of templateMeta) {
+            const metaHasUnmentioned = SPECIALIZED_QUALIFIERS.some(
+              (q) =>
+                (meta.normName.includes(q) || meta.normSize.includes(q)) &&
+                !queryNormAll.includes(q),
+            );
+            if (metaHasUnmentioned) continue;
+            if (targetSize && meta.normSize !== targetSize) continue;
+            let overlap = 0;
+            for (const tok of meta.tokens) {
+              if (queryNormAll.includes(tok)) overlap++;
+            }
+            if (overlap === 0) continue;
+            let score = overlap * 2 + overlap / meta.tokens.length;
+            if (
+              queryNormAll.includes("ماسور") &&
+              meta.normName.includes("عادي pin20")
+            ) {
+              score += 2;
+            }
+            if (score > bestPlainScore) {
+              bestPlainScore = score;
+              bestPlainId = meta.template.id;
+            }
+          }
+          if (bestPlainId) {
+            templateId = bestPlainId;
+          }
+        }
+      }
+    }
 
     // Verify AI's template size against extractedSize; switch within same item name if mismatched
     if (templateId && extractedSize) {
@@ -974,6 +1133,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
         if (meta.normName === normalizeAr(rawName)) {
           score += 3;
         }
+        for (const q of SPECIALIZED_QUALIFIERS) {
+          if (
+            (meta.normName.includes(q) || meta.normSize.includes(q)) &&
+            !queryNorm.includes(q)
+          ) {
+            score -= 3.5;
+          }
+        }
+        if (
+          queryNorm.includes("ماسور") &&
+          !queryNorm.includes("مقاوم") &&
+          !queryNorm.includes("pin16") &&
+          meta.normName.includes("عادي pin20")
+        ) {
+          score += 1.5;
+        }
         if (extractedSize && meta.normSize) {
           score += meta.normSize === extractedSize ? 3 : -2;
         }
@@ -993,6 +1168,36 @@ Deno.serve(async (req: Request): Promise<Response> => {
       ? (catalog.templateById.get(templateId) ?? null)
       : null;
 
+    // Rule 5: Enforce brand pairing when no explicit brand was written on this line
+    if (!matchedItemBrand && matchedTemplate) {
+      const normCat = normalizeAr(
+        templateCategoryMap.get(matchedTemplate.id) ?? "",
+      );
+      if (
+        whitexBrandId &&
+        itemBrandId === rakBrandId &&
+        (normCat.includes("صرف") || normCat.includes("مواسير"))
+      ) {
+        itemBrandId = whitexBrandId;
+      } else if (
+        rakBrandId &&
+        itemBrandId === whitexBrandId &&
+        normCat.includes("تغذيه")
+      ) {
+        itemBrandId = rakBrandId;
+      }
+    }
+
+    // Rule 4: Determine requested_unit cleanly
+    let requestedUnit = rawRequestedUnit || cleanUnit;
+    if (queryNormAll.includes("متر")) {
+      requestedUnit = "متر";
+    } else if (queryNormAll.includes("عود")) {
+      requestedUnit = "عود";
+    } else if (!requestedUnit && matchedTemplate?.unit) {
+      requestedUnit = matchedTemplate.unit;
+    }
+
     let confidence =
       it.confidence === "high" ||
       it.confidence === "medium" ||
@@ -1005,17 +1210,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
       confidence = "medium";
     }
 
+    const parsedQty = parseQuantity(it.quantity);
+    const extractedQty =
+      parsedQty === 1 ? extractLeadingQuantity(rawOcr) : null;
+    const finalQty = extractedQty ?? parsedQty;
+
     return {
       raw_ocr_text: rawOcr,
       item_template_id: matchedTemplate?.id ?? null,
       brand_id: itemBrandId,
-      item_name: matchedTemplate?.name ?? (rawName || "صنف غير محدد"),
+      item_name: matchedTemplate?.name ?? (rawName || rawOcr || "صنف غير محدد"),
       size: matchedTemplate?.size ?? (rawSize || null),
-      unit:
-        matchedTemplate?.unit ?? (String(it.unit ?? "قطعة").trim() || "قطعة"),
-      quantity: parseQuantity(it.quantity),
+      unit: matchedTemplate?.unit ?? (cleanUnit || "قطعة"),
+      requested_unit: requestedUnit || null,
+      quantity: finalQty,
       confidence,
-      notes: it.notes ? String(it.notes).trim() : null,
+      notes: cleanNotes || null,
     };
   });
 
