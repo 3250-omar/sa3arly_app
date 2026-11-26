@@ -111,11 +111,26 @@ class CatalogState {
         .toList();
   }
 
+  static bool isYardTemplate(ItemTemplateModel t) =>
+      t.name.contains('يارد') || t.unit.contains('يارد');
+
   List<ItemTemplateModel> get filteredTemplates {
     final query = searchQuery.trim().toLowerCase();
+    final selectedCatName = selectedCategoryId == null
+        ? ''
+        : (categories
+                .where((c) => c.id == selectedCategoryId)
+                .firstOrNull
+                ?.name ??
+            '');
+    final isPipesCategorySelected = selectedCatName.contains('مواسير');
+    final queryAsksPipes =
+        query.contains('ماسور') || query.contains('مواسير');
+
     return templates.where((template) {
       if (selectedCategoryId != null &&
-          template.categoryId != selectedCategoryId) {
+          template.categoryId != selectedCategoryId &&
+          !(isPipesCategorySelected && isYardTemplate(template))) {
         return false;
       }
       if (selectedBrandId != null &&
@@ -132,7 +147,12 @@ class CatalogState {
             a.itemTemplateId == template.id &&
             a.aliasText.toLowerCase().contains(query),
       );
-      return matchesName || matchesSize || matchesAlias;
+      final matchesPipeDerivative =
+          queryAsksPipes && isYardTemplate(template);
+      return matchesName ||
+          matchesSize ||
+          matchesAlias ||
+          matchesPipeDerivative;
     }).toList();
   }
 }

@@ -1923,4 +1923,54 @@ void main() {
       expect(find.textContaining('يحتاج تأكيد قبل الاعتماد'), findsNothing);
     },
   );
+
+  test('CatalogState.filteredTemplates includes ياردة pipe derivatives when filtering by مواسير category or searching مواسير', () {
+    final cats = [
+      const CategoryModel(id: 'cat-sarf', name: 'صرف', sortOrder: 1),
+      const CategoryModel(id: 'cat-pipes', name: 'مواسير', sortOrder: 2),
+    ];
+    final tpls = [
+      const ItemTemplateModel(
+        id: 't-pipe',
+        categoryId: 'cat-pipes',
+        name: 'ماسورة',
+        size: '4 بوصة - سمك 4 مم',
+        unit: 'عود',
+      ),
+      const ItemTemplateModel(
+        id: 't-yard',
+        categoryId: 'cat-sarf',
+        name: 'ياردة 100 سم',
+        size: '110 مم',
+        unit: 'ياردة',
+      ),
+      const ItemTemplateModel(
+        id: 't-elbow',
+        categoryId: 'cat-sarf',
+        name: 'كوع',
+        size: '110 مم',
+      ),
+    ];
+    final baseState = CatalogState(
+      categories: cats,
+      brands: const [],
+      templates: tpls,
+      variants: const [],
+      aliases: const [],
+      shopSettings: DemoCatalogData.defaultSettings,
+    );
+
+    final byPipesCategory = baseState
+        .copyWith(selectedCategoryId: 'cat-pipes')
+        .filteredTemplates;
+    expect(byPipesCategory.any((t) => t.id == 't-pipe'), isTrue);
+    expect(byPipesCategory.any((t) => t.id == 't-yard'), isTrue);
+    expect(byPipesCategory.any((t) => t.id == 't-elbow'), isFalse);
+
+    final byPipesSearch = baseState
+        .copyWith(searchQuery: 'مواسير')
+        .filteredTemplates;
+    expect(byPipesSearch.any((t) => t.id == 't-yard'), isTrue);
+    expect(byPipesSearch.any((t) => t.id == 't-elbow'), isFalse);
+  });
 }

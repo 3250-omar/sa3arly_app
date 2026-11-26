@@ -153,38 +153,68 @@ function sizePartValue(part: string): number {
   return Number.isFinite(n) ? n : 999;
 }
 
-function normalizeSize(value: string | null | undefined): string {
+function normalizeSize(
+  value: string | null | undefined,
+  opts?: { isDrainage?: boolean },
+): string {
   if (!value) return "";
+  const isDrainage = opts?.isDrainage ?? true;
   let s = toWesternDigits(value)
     .toLowerCase()
     .replace(/\([^)]*\)/g, " ")
-    .replace(/-\s*سمك\s*[\d.]+\s*(?:مم|mm)?/g, " ")
+    .replace(/-\s*سمك\s*[\d.]+\s*(?:مم|ملي|مللي|ملم|mm)?/g, " ")
     .replace(/[أإآ]/g, "ا")
     .replace(/ى/g, "ي")
     .replace(/ة/g, "ه")
     .replace(/[\u064B-\u065F\u0670]/g, "");
 
+  // Preserve square floor-drain sizes (e.g. 15 × 15 or 20 × 20) before mm conversion
+  const squareDrain = s.match(/(?:^|\s)(15|20)\s*[×*x]\s*(15|20)(?=\s|$)/);
+  if (squareDrain && squareDrain[1] === squareDrain[2]) {
+    return `${squareDrain[1]}x${squareDrain[2]}`;
+  }
+
+  const mmUnit = String.raw`(?:مم|ملي|مللي|ملم|mm)?`;
+  const mmReq = String.raw`(?:مم|ملي|مللي|ملم|mm)`;
+
   s = s
     .replace(/بوصه\s*ونص|بوصة\s*ونص|1\s*و\s*1\/2|1\.5|1,5/g, " 1.5 ")
     .replace(
-      /تلات\s*ت?ارباع|تلت\s*ارباع|ثلاث[هة]?\s*ارباع|25\s*(?:مم|mm)?/g,
+      /تلات\s*ت?ارباع|تلت\s*ارباع|ثلاث[هة]?\s*ارباع|3\s*\/\s*4/g,
       " 3/4 ",
     )
-    .replace(/نص\s*بوصه|نصف\s*بوصه|\bنص\b|20\s*(?:مم|mm)?/g, " 1/2 ")
-    .replace(/160\s*(?:مم|mm)?/g, " 6 ")
-    .replace(/110\s*(?:مم|mm)?/g, " 4 ")
-    .replace(/(?:75|90)\s*(?:مم|mm)?/g, " 3 ")
-    .replace(/63\s*(?:مم|mm)?/g, " 2 ")
-    .replace(/50\s*(?:مم|mm)?/g, " 1.5 ")
-    .replace(/40\s*(?:مم|mm)?/g, " 1.25 ")
-    .replace(/32\s*(?:مم|mm)?/g, " 1 ")
+    .replace(/نص\s*بوصه|نصف\s*بوصه|\bنص\b|1\s*\/\s*2/g, " 1/2 ")
+    .replace(new RegExp(`\\b315\\s*${mmUnit}`, "g"), " 12 ")
+    .replace(new RegExp(`\\b250\\s*${mmUnit}`, "g"), " 10 ")
+    .replace(new RegExp(`\\b(?:200|219(?:\\.1)?)\\s*${mmUnit}`, "g"), " 8 ")
+    .replace(new RegExp(`\\b(?:160|168(?:\\.3)?)\\s*${mmUnit}`, "g"), " 6 ")
+    .replace(new RegExp(`\\b(?:125|140)\\s*${mmUnit}`, "g"), " 5 ")
+    .replace(new RegExp(`\\b(?:110|114(?:\\.3)?)\\s*${mmUnit}`, "g"), " 4 ")
+    .replace(new RegExp(`\\b(?:90|89|88(?:\\.9)?|82)\\s*${mmUnit}`, "g"), " 3 ")
+    .replace(
+      new RegExp(`\\b75\\s*${mmUnit}`, "g"),
+      isDrainage ? " 3 " : " 2.5 ",
+    )
+    .replace(new RegExp(`\\b(?:63|60|56)\\s*${mmUnit}`, "g"), " 2 ")
+    .replace(
+      new RegExp(`\\b50\\s*${mmUnit}`, "g"),
+      isDrainage ? " 2 " : " 1.5 ",
+    )
+    .replace(new RegExp(`\\b(?:48|43)\\s*${mmUnit}`, "g"), " 1.5 ")
+    .replace(
+      new RegExp(`\\b(?:40|42)\\s*${mmUnit}`, "g"),
+      isDrainage ? " 1.5 " : " 1.25 ",
+    )
+    .replace(new RegExp(`\\b(?:32|33|34)\\s*${mmUnit}`, "g"), " 1 ")
+    .replace(new RegExp(`\\b(?:25|26|27)\\s*${mmUnit}`, "g"), " 3/4 ")
+    .replace(new RegExp(`\\b(?:20|21)\\s*${mmUnit}`, "g"), " 1/2 ")
+    .replace(new RegExp(`\\b(?:15|16)\\s*${mmReq}`, "g"), " 1/2 ")
     .replace(/×|\*|\bفي\b|\bعلى\b|\bعلي\b/g, " x ")
     .replace(/[~ٓ″]/g, " ")
     .replace(/بوصه|بوصة|inch|in|"|''/g, " ");
 
-  const compound = s.match(
-    /(1\/2|3\/4|1\.5|1\.25|1|2|3|4|6)\s*(?:x|\/)\s*(1\/2|3\/4|1\.5|1\.25|1|2|3|4|6)/,
-  );
+  const sizeTok = "(1\\/2|3\\/4|1\\.25|1\\.5|2\\.5|12|10|1|2|3|4|5|6|8)";
+  const compound = s.match(new RegExp(`${sizeTok}\\s*(?:x|\\/)\\s*${sizeTok}`));
   if (compound) {
     const parts = [compound[1], compound[2]].sort(
       (a, b) => sizePartValue(a) - sizePartValue(b),
@@ -192,7 +222,7 @@ function normalizeSize(value: string | null | undefined): string {
     return `${parts[0]}x${parts[1]}`;
   }
 
-  const single = s.match(/(?:^|\s)(1\/2|3\/4|1\.5|1\.25|1|2|3|4|6)(?=\s|$)/);
+  const single = s.match(new RegExp(`(?:^|\\s)${sizeTok}(?=\\s|$)`));
   if (single) return single[1];
   if (/\bبوصه\b|\bبوصة\b/.test(value)) return "1";
   return "";
@@ -845,9 +875,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     "- علامات التكرار مثل (\" \") أو (//) أو (،،) أو ('') معناها نفس الشركة المكتوبة في السطر السابق.",
     "- مراعاة الثنائيات المعتادة ما لم يُذكر خلاف ذلك صراحة: بنود التغذية/البولي للشركات مثل 'راك' يكون الصرف والمواسير المقابل لها في الغالب 'وايتكس' (مثلاً لو الكشف بدأ بـ راك ثم ظهرت بنود صرف/مواسير صرف بدون شركة فهي وايتكس، والعكس لو وايتكس وظهرت بنود بولي/تغذية فهي راك).",
     "- ممنوع اختيار 'شعبي' إلا إذا كُتبت كلمة 'شعبي' أو 'اقتصادي' صراحة في الورقة، وإلا ضع bid: null.",
-    "قواعد المقاسات والسباكة المصرية:",
-    "- التغذية: 'نص'/'1/2'/'20مم' => '1/2 بوصة' | 'تلات ارباع'/'3/4'/'25مم' => '3/4 بوصة' | '1'/'بوصة'/'32مم' => '1 بوصة' | 'بوصة ونص'/'1.5'/'50مم' => '1.5 بوصة' | '2'/'63مم' => '2 بوصة'.",
-    "- الصرف والمواسير: '1.5 بوصة'، '2 بوصة'، '3 بوصة'، '4 بوصة'، '6 بوصة' (لا يوجد مقاس 3/2 بوصة؛ تحقق هل يقصد 3/4 أو 1/2 أو 1.5 بوصة).",
+    "قواعد المقاسات والسباكة المصرية (تحويل المللي إلى بوصة حسب نظام الشركة):",
+    "- إذا كُتب المقاس بالملي (مم / مللي / mm)، طابقه مباشرة مع الصنف المقابل بالبوصة أو بالملي في الكتالوج حسب المتاح لتلك الشركة:",
+    "- تغذية (بولي PPR): 'نص'/'15-16مم'/'20-21مم' => '1/2 بوصة' | 'تلات ارباع'/'25-27مم' => '3/4 بوصة' | '1 بوصة'/'32-34مم' => '1 بوصة' | 'بوصة وربع'/'40-42مم' => '1.25 بوصة' | 'بوصة ونص'/'50مم' => '1.5 بوصة' | '2 بوصة'/'60-63مم' => '2 بوصة' | '75مم' => '2.5 بوصة' | '90مم' => '3 بوصة' | '110مم' => '4 بوصة'.",
+    "- صرف ومواسير (PVC/uPVC حسب مواصفات الشركات DIN و ASTM): '32مم' => '1 بوصة' | '40/43/48مم' => '1.5 بوصة' | '50/56/60/63مم' => '2 بوصة' | '75/82/89/90مم' => '3 بوصة' | '110/114مم' => '4 بوصة' | '125/140مم' => '5 بوصة' | '160/168مم' => '6 بوصة' | '200/219مم' => '8 بوصة' | '250مم' => '10 بوصة' | '315مم' => '12 بوصة' (لا يوجد مقاس 3/2 بوصة؛ تحقق هل يقصد 3/4 أو 1/2 أو 1.5 بوصة).",
+    "- الياردة (ياردة 25/50/100/150/200/300/600 سم) هي من مشتقات مواسير الصرف بأطوال جاهزة؛ فلو ذُكرت «ياردة» أو طول محدد بالسم مع مقاس ماسورة صرف (مثل ياردة 100 سم 4 بوصة أو 110 مم) طابقها مباشرة مع صنف «ياردة» المناسب.",
     "- مصطلحات السباكين: معزول / شمس / فايبر = ماسورة مقاوم، ماسورة عادية / بولي بدون ذكر معزول = ماسورة عادي PIN20، بيبة=بلاعة، مشترك/قسام=T، مشطوف=واي، كوع مفتوح/45=كوع فاتح، كوع قفل=كوع عادي، كوع باب/كشف=كوع بالباب، عداية/مطب=كرنك، طربوش=هواية، سدة=طبة، كليبس=قفيز، يونيون=لاكور، بوش/رديوسر=نقاص، نتاية=داخلي، دكر=ذكر.",
     "أعد JSON فقط بدون أي نص إضافي:",
     '{"detected_brand_text":"نص الشركة أو null","bid":1,"items":[{"raw_ocr_text":"النص الأصلي للسطر","tid":12,"bid":1,"item_name":"اسم الصنف العربي","size":"المقاس أو null","unit":"قطعة أو متر أو عود","requested_unit":"متر أو عود أو قطعة","quantity":1,"confidence":"high أو medium أو low","notes":"ملاحظة أو null"}]}',
@@ -992,15 +1024,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (catName) templateCategoryMap.set(t.id, catName);
   }
 
-  const templateMeta = templates.map((t) => ({
-    template: t,
-    normName: normalizeAr(t.name),
-    tokens: normalizeAr(t.name)
-      .split(" ")
-      .filter((w) => w.length > 0),
-    normSize: normalizeSize(t.size),
-    normCategory: normalizeAr(t.categories?.name ?? ""),
-  }));
+  const templateMeta = templates.map((t) => {
+    const normCategory = normalizeAr(t.categories?.name ?? "");
+    const isDrainageTpl =
+      normCategory.includes("صرف") || normCategory.includes("مواسير");
+    return {
+      template: t,
+      normName: normalizeAr(t.name),
+      tokens: normalizeAr(t.name)
+        .split(" ")
+        .filter((w) => w.length > 0),
+      normSize: normalizeSize(t.size, { isDrainage: isDrainageTpl }),
+      altNormSize: normalizeSize(t.size, { isDrainage: !isDrainageTpl }),
+      normCategory,
+    };
+  });
   const templateUuidSet = new Set(templates.map((t) => t.id));
 
   const items = rawItems.map((it) => {
@@ -1043,10 +1081,40 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     const queryNormAll = normalizeAr(`${rawOcr} ${rawName}`);
+    const isDrainageQuery =
+      queryNormAll.includes("صرف") ||
+      queryNormAll.includes("وايتكس") ||
+      queryNormAll.includes("الشريف") ||
+      queryNormAll.includes("سمارت") ||
+      queryNormAll.includes("كاسيل") ||
+      queryNormAll.includes("فاتح") ||
+      queryNormAll.includes("بالباب") ||
+      queryNormAll.includes("بلاعه") ||
+      queryNormAll.includes("هوايه") ||
+      queryNormAll.includes("واي") ||
+      queryNormAll.includes("جوان");
     const extractedSize =
-      normalizeSize(rawSize) ||
-      normalizeSize(strippedRaw) ||
-      normalizeSize(rawName);
+      normalizeSize(rawSize, { isDrainage: isDrainageQuery }) ||
+      normalizeSize(strippedRaw, { isDrainage: isDrainageQuery }) ||
+      normalizeSize(rawName, { isDrainage: isDrainageQuery });
+    const extractedSizeAlt =
+      normalizeSize(rawSize, { isDrainage: !isDrainageQuery }) ||
+      normalizeSize(strippedRaw, { isDrainage: !isDrainageQuery }) ||
+      normalizeSize(rawName, { isDrainage: !isDrainageQuery });
+
+    const matchesExtractedSize = (
+      metaNormSize: string,
+      metaAltNormSize?: string,
+    ): boolean => {
+      if (!extractedSize) return true;
+      return (
+        metaNormSize === extractedSize ||
+        (!!extractedSizeAlt && metaNormSize === extractedSizeAlt) ||
+        (!!metaAltNormSize &&
+          (metaAltNormSize === extractedSize ||
+            (!!extractedSizeAlt && metaAltNormSize === extractedSizeAlt)))
+      );
+    };
 
     // Rule 3: Never pick a specialized qualifier (مقاوم, أسود, بالباب, PIN16, etc.) if not mentioned in OCR
     if (templateId) {
@@ -1057,7 +1125,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
           (q) => chosenNorm.includes(q) && !queryNormAll.includes(q),
         );
         if (hasUnmentionedQualifier) {
-          const targetSize = extractedSize || normalizeSize(chosen.size);
+          const targetSize =
+            extractedSize ||
+            normalizeSize(chosen.size, { isDrainage: isDrainageQuery });
           let bestPlainId: string | null = null;
           let bestPlainScore = 0;
           for (const meta of templateMeta) {
@@ -1067,7 +1137,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 !queryNormAll.includes(q),
             );
             if (metaHasUnmentioned) continue;
-            if (targetSize && meta.normSize !== targetSize) continue;
+            if (targetSize) {
+              const sizeOk = extractedSize
+                ? matchesExtractedSize(meta.normSize, meta.altNormSize)
+                : meta.normSize === targetSize ||
+                  meta.altNormSize === targetSize;
+              if (!sizeOk) continue;
+            }
             let overlap = 0;
             for (const tok of meta.tokens) {
               if (queryNormAll.includes(tok)) overlap++;
@@ -1096,11 +1172,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (templateId && extractedSize) {
       const chosen = catalog.templateById.get(templateId);
       if (chosen) {
-        const chosenSize = normalizeSize(chosen.size);
-        if (chosenSize && chosenSize !== extractedSize) {
+        const chosenCatNorm = normalizeAr(
+          templateCategoryMap.get(chosen.id) ?? "",
+        );
+        const chosenIsDrainage =
+          chosenCatNorm.includes("صرف") || chosenCatNorm.includes("مواسير");
+        const chosenSize = normalizeSize(chosen.size, {
+          isDrainage: chosenIsDrainage,
+        });
+        const chosenAltSize = normalizeSize(chosen.size, {
+          isDrainage: !chosenIsDrainage,
+        });
+        if (chosenSize && !matchesExtractedSize(chosenSize, chosenAltSize)) {
           const siblings = catalog.templatesByName.get(chosen.name) ?? [];
-          const better = siblings.find(
-            (s) => normalizeSize(s.size) === extractedSize,
+          const better = siblings.find((s) =>
+            matchesExtractedSize(
+              normalizeSize(s.size, { isDrainage: chosenIsDrainage }),
+              normalizeSize(s.size, { isDrainage: !chosenIsDrainage }),
+            ),
           );
           if (better) {
             templateId = better.id;
@@ -1150,7 +1239,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
           score += 1.5;
         }
         if (extractedSize && meta.normSize) {
-          score += meta.normSize === extractedSize ? 3 : -2;
+          score += matchesExtractedSize(meta.normSize, meta.altNormSize)
+            ? 3
+            : -2;
         }
         if (score > bestScore) {
           bestScore = score;

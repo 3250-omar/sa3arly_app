@@ -677,6 +677,13 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     final categoryNameById = <String, String>{
       for (final c in catalog.categories) c.id: c.name,
     };
+    final refCatIdName = currentTemplate != null
+        ? (categoryNameById[currentTemplate.categoryId] ?? '')
+        : '';
+    final isRefPipeOrYard = referenceItem != null &&
+        (refNameNorm.contains('ماسور') ||
+            refNameNorm.contains('يارد') ||
+            refCatIdName.contains('مواسير'));
 
     // Score similarity for every template relative to referenceItem
     final similarityById = <String, int>{};
@@ -698,6 +705,10 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           if (refTokens.contains(tok)) {
             score += 10;
           }
+        }
+        if (isRefPipeOrYard &&
+            (CatalogState.isYardTemplate(t) || tNameNorm.contains('ماسور'))) {
+          score += 12;
         }
         if (refSizeNorm.isNotEmpty &&
             t.size != null &&
@@ -738,20 +749,26 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
           builder: (ctx, setSheetState) {
             final qNorm = _normalizeSearchAr(query);
             final qTokens = _searchTokens(query);
+            final selectedFilterCatName = categoryNameById[filterMode] ?? '';
+            final isPipesFilter = selectedFilterCatName.contains('مواسير');
+            final queryAsksPipes =
+                qNorm.contains('ماسور') || qNorm.contains('مواسير');
 
             final matches = <ItemTemplateModel>[];
             for (final t in catalog.templates) {
               if (qNorm.isNotEmpty) {
                 if (filterMode != '__smart__' &&
                     filterMode != '__all__' &&
-                    t.categoryId != filterMode) {
+                    t.categoryId != filterMode &&
+                    !(isPipesFilter && CatalogState.isYardTemplate(t))) {
                   continue;
                 }
                 final hay = _normalizeSearchAr(
                   '${t.name} ${t.size ?? ''} ${categoryNameById[t.categoryId] ?? ''}',
                 );
                 final matchesText = hay.contains(qNorm) ||
-                    (qTokens.isNotEmpty && qTokens.every(hay.contains));
+                    (qTokens.isNotEmpty && qTokens.every(hay.contains)) ||
+                    (queryAsksPipes && CatalogState.isYardTemplate(t));
                 final matchesAlias = !matchesText &&
                     catalog.aliases.any(
                       (a) =>
@@ -764,12 +781,14 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                 if (filterMode == '__smart__') {
                   final sim = similarityById[t.id] ?? 0;
                   final sameCat = referenceCategoryId != null &&
-                      t.categoryId == referenceCategoryId;
+                      (t.categoryId == referenceCategoryId ||
+                          (isRefPipeOrYard && CatalogState.isYardTemplate(t)));
                   if (sameCat || sim >= 10 || referenceCategoryId == null) {
                     matches.add(t);
                   }
                 } else if (filterMode == '__all__' ||
-                    t.categoryId == filterMode) {
+                    t.categoryId == filterMode ||
+                    (isPipesFilter && CatalogState.isYardTemplate(t))) {
                   matches.add(t);
                 }
               }

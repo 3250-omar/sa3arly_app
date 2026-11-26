@@ -155,9 +155,18 @@ class _CatalogTreeScreenState extends ConsumerState<CatalogTreeScreen> {
     final filtered = catalog.filteredTemplates;
 
     // Group templates by category to form the Product Tree
+    // When filtering by 'مواسير', also include 'ياردة' pipe derivatives under that group.
     final grouped = <CategoryModel, List<ItemTemplateModel>>{};
     for (final cat in catalog.categories) {
-      final items = filtered.where((t) => t.categoryId == cat.id).toList();
+      final includeYard =
+          catalog.selectedCategoryId == cat.id && cat.name.contains('مواسير');
+      final items = filtered
+          .where(
+            (t) =>
+                t.categoryId == cat.id ||
+                (includeYard && CatalogState.isYardTemplate(t)),
+          )
+          .toList();
       if (items.isNotEmpty) {
         grouped[cat] = items;
       }
